@@ -745,11 +745,11 @@ int srt::CUDTUnited::newConnection(const SRTSOCKET     listen,
         // removal from group and resetting m_GroupOf field.
 
 #if ENABLE_BONDING
-        if (ns->m_GroupOf)
+        shared_ptr<CUDTGroup> g = ns->m_GroupOf;
+        if (g != NULL)
         {
             // XXX this might require another check of group type.
             // For redundancy group, at least, update the status in the group
-            CUDTGroup* g = ns->m_GroupOf;
             ScopedLock grlock(g->m_GroupLock);
             if (g->m_bClosing)
             {
@@ -1245,19 +1245,15 @@ SRTSOCKET srt::CUDTUnited::accept(const SRTSOCKET listen, sockaddr* pw_addr, int
 #if ENABLE_BONDING
     if (ls->core().m_config.iGroupConnect == 1 && s->m_GroupOf)
     {
-        // Put a lock to protect the group against accidental deletion
-        // in the meantime.
-        ScopedLock glock(m_GlobControlLock);
-        // Check again; it's unlikely to happen, but
-        // it's a theoretically possible scenario
-        if (s->m_GroupOf)
+        std::shared_ptr<CUDTGroup> group = s->m_GroupOf;
+        if (group)
         {
-            u                                = s->m_GroupOf->m_GroupID;
+            u                                = group->m_GroupID;
             s->core().m_config.iGroupConnect = 1; // should be derived from ls, but make sure
 
             // Mark the beginning of the connection at the moment
             // when the group ID is returned to the app caller
-            s->m_GroupOf->m_stats.tsLastSampleTime = steady_clock::now();
+            group->m_stats.tsLastSampleTime = steady_clock::now();
         }
         else
         {
@@ -1301,7 +1297,7 @@ int srt::CUDTUnited::connect(SRTSOCKET u, const sockaddr* srcname, const sockadd
     // the group.
     if (u & SRTGROUP_MASK)
     {
-        GroupKeeper k(*this, u, ERH_THROW);
+        std::shared_ptr<CUDTGroup> group = locateAcquireGroup(u, ERH_THROW); 
         // Note: forced_isn is ignored when connecting a group.
         // The group manages the ISN by itself ALWAYS, that is,
         // it's generated anew for the very first socket, and then
@@ -1310,7 +1306,7 @@ int srt::CUDTUnited::connect(SRTSOCKET u, const sockaddr* srcname, const sockadd
 
         // When connecting to exactly one target, only this very target
         // can be returned as a socket, so rewritten back array can be ignored.
-        return singleMemberConnect(k.group, gd);
+        return singleMemberConnect(group, gd);
     }
 #endif
 
@@ -1341,14 +1337,13 @@ int srt::CUDTUnited::connect(const SRTSOCKET u, const sockaddr* name, int namele
     // the group.
     if (u & SRTGROUP_MASK)
     {
-        GroupKeeper k(*this, u, ERH_THROW);
-
+        std::shared_ptr<CUDTGroup> group = locateAcquireGroup(u, ERH_THROW); 
         // Note: forced_isn is ignored when connecting a group.
         // The group manages the ISN by itself ALWAYS, that is,
         // it's generated anew for the very first socket, and then
         // derived by all sockets in the group.
         SRT_SOCKGROUPCONFIG gd[1] = {srt_prepare_endpoint(NULL, name, namelen)};
-        return singleMemberConnect(k.group, gd);
+        return singleMemberConnect(group, gd);
     }
 #endif
 
@@ -1360,7 +1355,7 @@ int srt::CUDTUnited::connect(const SRTSOCKET u, const sockaddr* name, int namele
 }
 
 #if ENABLE_BONDING
-int srt::CUDTUnited::singleMemberConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* gd)
+int srt::CUDTUnited::singleMemberConnect(std::shared_ptr<CUDTGroup> pg, SRT_SOCKGROUPCONFIG* gd)
 {
     int gstat = groupConnect(pg, gd, 1);
     if (gstat == -1)
@@ -1380,10 +1375,9 @@ int srt::CUDTUnited::singleMemberConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* gd)
 }
 
 // [[using assert(pg->m_iBusy > 0)]]
-int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, int arraysize)
+int srt::CUDTUnited::groupConnect(std::shared_ptr<CUDTGroup> pg, SRT_SOCKGROUPCONFIG* targets, int arraysize)
 {
-    CUDTGroup& g = *pg;
-    SRT_ASSERT(g.m_iBusy > 0);
+    SRT_ASSERT(pg->m_iBusy > 0);
 
     // Check and report errors on data brought in by srt_prepare_endpoint,
     // as the latter function has no possibility to report errors.
@@ -1407,11 +1401,11 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
     // group is already OPENED returns immediately, regardless if the
     // connection is going to later succeed or fail (this will be
     // known in the group state information).
-    bool       block_new_opened = !g.m_bOpened && g.m_bSynRecving;
-    const bool was_empty        = g.groupEmpty();
+    bool       block_new_opened = !pg->m_bOpened && pg->m_bSynRecving;
+    const bool was_empty        = pg->groupEmpty();
 
     // In case the group was retried connection, clear first all epoll readiness.
-    const int ncleared = m_EPoll.update_events(g.id(), g.m_sPollID, SRT_EPOLL_ERR, false);
+    const int ncleared = m_EPoll.update_events(pg->id(), pg->m_sPollID, SRT_EPOLL_ERR, false);
     if (was_empty || ncleared)
     {
         HLOGC(aclog.Debug,
@@ -1420,7 +1414,7 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
         // IN/OUT only in case when the group is empty, otherwise it would
         // clear out correct readiness resulting from earlier calls.
         // This also should happen if ERR flag was set, as IN and OUT could be set, too.
-        m_EPoll.update_events(g.id(), g.m_sPollID, SRT_EPOLL_IN | SRT_EPOLL_OUT, false);
+        m_EPoll.update_events(pg->id(), pg->m_sPollID, SRT_EPOLL_IN | SRT_EPOLL_OUT, false);
     }
     SRTSOCKET retval = -1;
 
@@ -1476,11 +1470,11 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
         string error_reason SRT_ATR_UNUSED;
         try
         {
-            for (size_t i = 0; i < g.m_config.size(); ++i)
+            for (size_t i = 0; i < pg->m_config.size(); ++i)
             {
-                HLOGC(aclog.Debug, log << "groupConnect: OPTION @" << sid << " #" << g.m_config[i].so);
-                error_reason = "group-derived option: #" + Sprint(g.m_config[i].so);
-                ns->core().setOpt(g.m_config[i].so, &g.m_config[i].value[0], (int)g.m_config[i].value.size());
+                HLOGC(aclog.Debug, log << "groupConnect: OPTION @" << sid << " #" << pg->m_config[i].so);
+                error_reason = "group-derived option: #" + Sprint(pg->m_config[i].so);
+                ns->core().setOpt(pg->m_config[i].so, &pg->m_config[i].value[0], (int)pg->m_config[i].value.size());
             }
 
             // Do not try to set a user option if failed already.
@@ -1552,20 +1546,20 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
                 proceed = false;
             }
 
-            if (g.m_bClosing)
+            if (pg->m_bClosing)
             {
                 HLOGC(aclog.Debug,
-                      log << "srt_connect_group: not processing @" << sid << " due to CLOSED GROUP $" << g.m_GroupID);
+                      log << "srt_connect_group: not processing @" << sid << " due to CLOSED GROUP $" << pg->m_GroupID);
                 proceed = false;
             }
 
             if (proceed)
             {
-                CUDTGroup::SocketData* f = g.add(data);
+                CUDTGroup::SocketData* f = pg->add(data);
                 ns->m_GroupMemberData    = f;
-                ns->m_GroupOf            = &g;
+                ns->m_GroupOf            = pg;
                 f->weight                = targets[tii].weight;
-                HLOGC(aclog.Debug, log << "srt_connect_group: socket @" << sid << " added to group $" << g.m_GroupID);
+                HLOGC(aclog.Debug, log << "srt_connect_group: socket @" << sid << " added to group $" << pg->m_GroupID);
             }
             else
             {
@@ -1586,7 +1580,7 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
         ns->core().m_cbPacketArrival.set(ns->m_pUDT, &CUDT::groupPacketArrival);
         */
 
-        int isn = g.currentSchedSequence();
+        int isn = pg->currentSchedSequence();
 
         // Set it the groupconnect option, as all in-group sockets should have.
         ns->core().m_config.iGroupConnect = 1;
@@ -1603,8 +1597,8 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
         // it may still be needed for the further check if the redundant
         // connection succeeded or failed and whether the new socket is
         // ready to use or needs to be closed.
-        epoll_add_usock_INTERNAL(g.m_SndEID, ns, &connect_modes);
-        epoll_add_usock_INTERNAL(g.m_RcvEID, ns, &connect_modes);
+        epoll_add_usock_INTERNAL(pg->m_SndEID, ns, &connect_modes);
+        epoll_add_usock_INTERNAL(pg->m_RcvEID, ns, &connect_modes);
 
         // Adding a socket on which we need to block to BOTH these tracking EIDs
         // and the blocker EID. We'll simply remove from them later all sockets that
@@ -1664,7 +1658,7 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
         {
             // NOTE: Not applying m_GlobControlLock because the group is now
             // set busy, so it won't be deleted, even if it was requested to be closed.
-            ScopedLock grd(g.m_GroupLock);
+            ScopedLock grd(pg->m_GroupLock);
 
             if (!ns->m_GroupOf)
             {
@@ -1684,7 +1678,7 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
 
             // Now under a group lock, we need to make sure the group isn't being closed
             // in order not to add a socket to a dead group.
-            if (g.m_bClosing)
+            if (pg->m_bClosing)
             {
                 LOGC(aclog.Error, log << "groupConnect: group deleted while connecting; breaking the process");
 
@@ -1699,7 +1693,7 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
 
             HLOGC(aclog.Debug,
                   log << "groupConnect: @" << sid << " connection successful, setting group OPEN (was "
-                      << (g.m_bOpened ? "ALREADY" : "NOT") << "), will " << (block_new_opened ? "" : "NOT ")
+                      << (pg->m_bOpened ? "ALREADY" : "NOT") << "), will " << (block_new_opened ? "" : "NOT ")
                       << "block the connect call, status:" << SockStatusStr(st));
 
             // XXX OPEN OR CONNECTED?
@@ -1710,9 +1704,9 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
             // SHOULD BLOCK the latter, even though is OPEN.
             // Or, OPEN should be removed from here and srt_connect(_group)
             // should block always if the group doesn't have neither 1 conencted link
-            g.m_bOpened = true;
+            pg->m_bOpened = true;
 
-            g.m_stats.tsLastSampleTime = steady_clock::now();
+            pg->m_stats.tsLastSampleTime = steady_clock::now();
 
             f->laststatus = st;
             // Check the socket status and update it.
@@ -1725,8 +1719,8 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
             {
                 f->sndstate = SRT_GST_BROKEN;
                 f->rcvstate = SRT_GST_BROKEN;
-                epoll_remove_socket_INTERNAL(g.m_SndEID, ns);
-                epoll_remove_socket_INTERNAL(g.m_RcvEID, ns);
+                epoll_remove_socket_INTERNAL(pg->m_SndEID, ns);
+                epoll_remove_socket_INTERNAL(pg->m_RcvEID, ns);
             }
             else
             {
@@ -1792,7 +1786,7 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
         // lock the groups so that no one messes up with something here
         // in the meantime.
 
-        ScopedLock lock(*g.exp_groupLock());
+        ScopedLock lock(*pg->exp_groupLock());
 
         // NOTE: UNDER m_GroupLock, NO API FUNCTION CALLS DARE TO HAPPEN BELOW!
 
@@ -1811,8 +1805,8 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
                 broken.push_back(sid);
 
                 epoll_remove_socket_INTERNAL(eid, y->second);
-                epoll_remove_socket_INTERNAL(g.m_SndEID, y->second);
-                epoll_remove_socket_INTERNAL(g.m_RcvEID, y->second);
+                epoll_remove_socket_INTERNAL(pg->m_SndEID, y->second);
+                epoll_remove_socket_INTERNAL(pg->m_RcvEID, y->second);
             }
         }
 
@@ -1851,8 +1845,8 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
                     broken.push_back(sid);
 
                 epoll_remove_socket_INTERNAL(eid, s);
-                epoll_remove_socket_INTERNAL(g.m_SndEID, s);
-                epoll_remove_socket_INTERNAL(g.m_RcvEID, s);
+                epoll_remove_socket_INTERNAL(pg->m_SndEID, s);
+                epoll_remove_socket_INTERNAL(pg->m_RcvEID, s);
 
                 continue;
             }
@@ -1862,7 +1856,7 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
                 HLOGC(aclog.Debug,
                       log << "groupConnect: Socket @" << sid << " got CONNECTED as first in the group - reporting");
                 retval           = sid;
-                g.m_bConnected   = true;
+                pg->m_bConnected   = true;
                 block_new_opened = false; // Interrupt also rolling epoll (outer loop)
 
                 // Remove this socket from SND EID because it doesn't need to
@@ -1870,7 +1864,7 @@ int srt::CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, i
                 // however because RCV procedure relies on epoll also for reading
                 // and when found this socket connected it will "upgrade" it to
                 // read-ready tracking only.
-                epoll_remove_socket_INTERNAL(g.m_SndEID, s);
+                epoll_remove_socket_INTERNAL(pg->m_SndEID, s);
                 break;
             }
 
@@ -1984,9 +1978,9 @@ int srt::CUDTUnited::close(const SRTSOCKET u)
 #if ENABLE_BONDING
     if (u & SRTGROUP_MASK)
     {
-        GroupKeeper k(*this, u, ERH_THROW);
-        k.group->close();
-        deleteGroup(k.group);
+        std::shared_ptr<CUDTGroup> group = locateAcquireGroup(u, ERH_THROW); 
+        group->close();
+        deleteGroup(group);
         return 0;
     }
 #endif
@@ -2015,7 +2009,7 @@ int srt::CUDTUnited::close(const SRTSOCKET u)
 }
 
 #if ENABLE_BONDING
-void srt::CUDTUnited::deleteGroup(CUDTGroup* g)
+void srt::CUDTUnited::deleteGroup(std::shared_ptr<CUDTGroup> g)
 {
     using srt_logging::gmlog;
 
@@ -2024,13 +2018,13 @@ void srt::CUDTUnited::deleteGroup(CUDTGroup* g)
 }
 
 // [[using locked(m_GlobControlLock)]]
-void srt::CUDTUnited::deleteGroup_LOCKED(CUDTGroup* g)
+void srt::CUDTUnited::deleteGroup_LOCKED(std::shared_ptr<CUDTGroup> g)
 {
     SRT_ASSERT(g->groupEmpty());
 
     // After that the group is no longer findable by GroupKeeper
-    m_Groups.erase(g->m_GroupID);
     m_ClosedGroups[g->m_GroupID] = g;
+    m_Groups.erase(g->m_GroupID);
 
     // Paranoid check: since the group is in m_ClosedGroups
     // it may potentially be deleted. Make sure no socket points
@@ -2522,6 +2516,12 @@ int srt::CUDTUnited::epoll_remove_entity(const int eid, EntityType* ent)
     return ret;
 }
 
+template <class EntityType>
+int srt::CUDTUnited::epoll_remove_entity(const int eid, std::shared_ptr<EntityType> ent)
+{
+    return epoll_remove_entity(eid, ent.get());
+
+}
 // Needed internal access!
 int srt::CUDTUnited::epoll_remove_socket_INTERNAL(const int eid, CUDTSocket* s)
 {
@@ -2529,7 +2529,7 @@ int srt::CUDTUnited::epoll_remove_socket_INTERNAL(const int eid, CUDTSocket* s)
 }
 
 #if ENABLE_BONDING
-int srt::CUDTUnited::epoll_remove_group_INTERNAL(const int eid, CUDTGroup* g)
+int srt::CUDTUnited::epoll_remove_group_INTERNAL(const int eid, std::shared_ptr<CUDTGroup> g)
 {
     return epoll_remove_entity(eid, g);
 }
@@ -2540,12 +2540,10 @@ int srt::CUDTUnited::epoll_remove_usock(const int eid, const SRTSOCKET u)
     CUDTSocket* s = 0;
 
 #if ENABLE_BONDING
-    CUDTGroup* g = 0;
     if (u & SRTGROUP_MASK)
     {
-        GroupKeeper k(*this, u, ERH_THROW);
-        g = k.group;
-        return epoll_remove_entity(eid, g);
+        std::shared_ptr<CUDTGroup> group = locateAcquireGroup(u, ERH_THROW); 
+        return epoll_remove_entity(eid, group);
     }
     else
 #endif
@@ -2609,7 +2607,7 @@ srt::CUDTSocket* srt::CUDTUnited::locateSocket_LOCKED(SRTSOCKET u)
 }
 
 #if ENABLE_BONDING
-srt::CUDTGroup* srt::CUDTUnited::locateAcquireGroup(SRTSOCKET u, ErrorHandling erh)
+std::shared_ptr<srt::CUDTGroup> srt::CUDTUnited::locateAcquireGroup(SRTSOCKET u, ErrorHandling erh)
 {
     ScopedLock cg(m_GlobControlLock);
 
@@ -2626,10 +2624,9 @@ srt::CUDTGroup* srt::CUDTUnited::locateAcquireGroup(SRTSOCKET u, ErrorHandling e
     return i->second;
 }
 
-srt::CUDTGroup* srt::CUDTUnited::acquireSocketsGroup(CUDTSocket* s)
+std::shared_ptr<srt::CUDTGroup> srt::CUDTUnited::acquireSocketsGroup(CUDTSocket* s)
 {
-    ScopedLock cg(m_GlobControlLock);
-    CUDTGroup* g = s->m_GroupOf;
+    std::shared_ptr<CUDTGroup> g = s->m_GroupOf;
     if (!g)
         return NULL;
 
@@ -2719,12 +2716,12 @@ void srt::CUDTUnited::checkBrokenSockets()
         // group as closing will not continue with the API and return.
         // If we caught some API function still using the closed group,
         // it's not going to wait, will be checked next time.
-        if (i->second->isStillBusy())
+        if (i->second.use_count() > 1)
             continue;
 
         delgids.push_back(i->first);
-        delete i->second;
-        i->second = NULL; // just for a case, avoid a dangling pointer
+        //delete i->second; No need to delete it explicitly removing the last shared_ptr will do the job
+        i->second = NULL; // Will free the CUDTGroup
     }
 
     for (vector<SRTSOCKET>::iterator di = delgids.begin(); di != delgids.end(); ++di)
@@ -3522,12 +3519,14 @@ srt::CUDT::APIError::APIError(CodeMajor mj, CodeMinor mn, int syserr)
 // This doesn't have argument of GroupType due to header file conflicts.
 
 // [[using locked(s_UDTUnited.m_GlobControlLock)]]
-srt::CUDTGroup& srt::CUDT::newGroup(const int type)
+std::shared_ptr<srt::CUDTGroup> srt::CUDT::newGroup(const int type)
 {
     const SRTSOCKET id = uglobal().generateSocketID(true);
 
     // Now map the group
-    return uglobal().addGroup(id, SRT_GROUP_TYPE(type)).set_id(id);
+    std::shared_ptr<srt::CUDTGroup> group = uglobal().addGroup(id, SRT_GROUP_TYPE(type));
+    group->set_id(id);
+    return group;
 }
 
 SRTSOCKET srt::CUDT::createGroup(SRT_GROUP_TYPE gt)
@@ -3535,7 +3534,8 @@ SRTSOCKET srt::CUDT::createGroup(SRT_GROUP_TYPE gt)
     try
     {
         srt::sync::ScopedLock globlock(uglobal().m_GlobControlLock);
-        return newGroup(gt).id();
+        std::shared_ptr<CUDTGroup> group = newGroup(gt);
+        return group->id();
         // Note: potentially, after this function exits, the group
         // could be deleted, immediately, from a separate thread (tho
         // unlikely because the other thread would need some handle to
@@ -3558,7 +3558,7 @@ SRTSOCKET srt::CUDT::createGroup(SRT_GROUP_TYPE gt)
 // [[using locked(CUDT::s_UDTUnited.m_GlobControlLock)]]
 void srt::CUDTSocket::removeFromGroup(bool broken)
 {
-    CUDTGroup* g = m_GroupOf;
+    std::shared_ptr<CUDTGroup> g = m_GroupOf;
     if (g)
     {
         // Reset group-related fields immediately. They won't be accessed
@@ -3590,12 +3590,15 @@ SRTSOCKET srt::CUDT::getGroupOfSocket(SRTSOCKET socket)
 {
     // Lock this for the whole function as we need the group
     // to persist the call.
-    ScopedLock  glock(uglobal().m_GlobControlLock);
-    CUDTSocket* s = uglobal().locateSocket_LOCKED(socket);
-    if (!s || !s->m_GroupOf)
-        return APIError(MJ_NOTSUP, MN_INVAL, 0);
+    CUDTSocket* s = uglobal().locateSocket(socket, srt::CUDTUnited::ERH_RETURN);
 
-    return s->m_GroupOf->id();
+    if (s != NULL )
+    {
+        std::shared_ptr<CUDTGroup> group = s->m_GroupOf;
+        if (group != NULL)
+            return group->id();
+    }
+    return APIError(MJ_NOTSUP, MN_INVAL, 0);
 }
 
 int srt::CUDT::getGroupData(SRTSOCKET groupid, SRT_SOCKGROUPDATA* pdata, size_t* psize)

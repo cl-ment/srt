@@ -562,12 +562,12 @@ private:
     SRT_ATR_NODISCARD bool checkApplyFilterConfig(const std::string& cs);
 
 #if ENABLE_BONDING
-    static CUDTGroup& newGroup(const int); // defined EXCEPTIONALLY in api.cpp for convenience reasons
+    static std::shared_ptr<srt::CUDTGroup> newGroup(const int type);
     // Note: This is an "interpret" function, which should treat the tp as
     // "possibly group type" that might be out of the existing values.
     SRT_ATR_NODISCARD bool interpretGroup(const int32_t grpdata[], size_t data_size, int hsreq_type_cmd);
     SRT_ATR_NODISCARD SRTSOCKET makeMePeerOf(SRTSOCKET peergroup, SRT_GROUP_TYPE tp, uint32_t link_flags);
-    void synchronizeWithGroup(CUDTGroup* grp);
+    void synchronizeWithGroup(std::shared_ptr<CUDTGroup> gp);
 #endif
 
     void updateAfterSrtHandshake(int hsv);

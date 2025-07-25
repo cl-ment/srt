@@ -155,7 +155,7 @@ public:
     SRTSOCKET m_PeerID; //< peer socket ID
 #if ENABLE_BONDING
     groups::SocketData* m_GroupMemberData; //< Pointer to group member data, or NULL if not a group member
-    CUDTGroup*          m_GroupOf;         //< Group this socket is a member of, or NULL if it isn't
+    std::shared_ptr<CUDTGroup>          m_GroupOf;         //< Group this socket is a member of, or NULL if it isn't
 #endif
 
     int32_t m_iISN; //< initial sequence number, used to tell different connection from same IP:port
@@ -305,8 +305,8 @@ public:
     int       connect(const SRTSOCKET u, const sockaddr* name, int namelen, int32_t forced_isn);
     int       connectIn(CUDTSocket* s, const sockaddr_any& target, int32_t forced_isn);
 #if ENABLE_BONDING
-    int groupConnect(CUDTGroup* g, SRT_SOCKGROUPCONFIG targets[], int arraysize);
-    int singleMemberConnect(CUDTGroup* g, SRT_SOCKGROUPCONFIG* target);
+    int groupConnect(std::shared_ptr<CUDTGroup> pg, SRT_SOCKGROUPCONFIG* targets, int arraysize);
+    int singleMemberConnect(std::shared_ptr<CUDTGroup> pg, SRT_SOCKGROUPCONFIG* gd);
 #endif
     int  close(const SRTSOCKET u);
     int  close(CUDTSocket* s);
@@ -326,9 +326,11 @@ public:
     int  epoll_remove_usock(const int eid, const SRTSOCKET u);
     template <class EntityType>
     int epoll_remove_entity(const int eid, EntityType* ent);
+    template <class EntityType>
+    int epoll_remove_entity(const int eid, std::shared_ptr<EntityType> ent);
     int epoll_remove_socket_INTERNAL(const int eid, CUDTSocket* ent);
 #if ENABLE_BONDING
-    int epoll_remove_group_INTERNAL(const int eid, CUDTGroup* ent);
+    int epoll_remove_group_INTERNAL(const int eid, std::shared_ptr<CUDTGroup> g);
 #endif
     int     epoll_remove_ssock(const int eid, const SYSSOCKET s);
     int     epoll_update_ssock(const int eid, const SYSSOCKET s, const int* events = NULL);
@@ -338,29 +340,30 @@ public:
 
 #if ENABLE_BONDING
     SRT_ATR_NODISCARD SRT_ATTR_REQUIRES(m_GlobControlLock)
-    CUDTGroup& addGroup(SRTSOCKET id, SRT_GROUP_TYPE type)
+    std::shared_ptr<CUDTGroup> addGroup(SRTSOCKET id, SRT_GROUP_TYPE type)
     {
         // This only ensures that the element exists.
         // If the element was newly added, it will be NULL.
-        CUDTGroup*& g = m_Groups[id];
-        if (!g)
+        std::shared_ptr<CUDTGroup> g = m_Groups[id];
+        if (g == NULL)
         {
             // This is a reference to the cell, so it will
             // rewrite it into the map.
-            g = new CUDTGroup(type);
+            g = std::make_shared<CUDTGroup>(type);
+            m_Groups[id] = g;
         }
 
         // Now we are sure that g is not NULL,
         // and persistence of this object is in the map.
         // The reference to the object can be safely returned here.
-        return *g;
+        return g;
     }
 
-    void deleteGroup(CUDTGroup* g);
-    void deleteGroup_LOCKED(CUDTGroup* g);
+    void deleteGroup(std::shared_ptr<CUDTGroup> g);
+    void deleteGroup_LOCKED(std::shared_ptr<CUDTGroup> g);
 
     SRT_ATR_NODISCARD SRT_ATTR_REQUIRES(m_GlobControlLock)
-    CUDTGroup* findPeerGroup_LOCKED(SRTSOCKET peergroup)
+    std::shared_ptr<CUDTGroup> findPeerGroup_LOCKED(SRTSOCKET peergroup)
     {
         for (groups_t::iterator i = m_Groups.begin(); i != m_Groups.end(); ++i)
         {
@@ -402,7 +405,7 @@ private:
     sockets_t m_Sockets;
 
 #if ENABLE_BONDING
-    typedef std::map<SRTSOCKET, CUDTGroup*> groups_t;
+    typedef std::map<SRTSOCKET, std::shared_ptr<CUDTGroup>> groups_t;
     SRT_ATTR_GUARDED_BY(m_GlobControlLock)
     groups_t m_Groups;
 #endif
@@ -429,12 +432,12 @@ private:
     CUDTSocket* locatePeer(const sockaddr_any& peer, const SRTSOCKET id, int32_t isn);
 
 #if ENABLE_BONDING
-    CUDTGroup* locateAcquireGroup(SRTSOCKET u, ErrorHandling erh = ERH_RETURN);
-    CUDTGroup* acquireSocketsGroup(CUDTSocket* s);
+    std::shared_ptr<srt::CUDTGroup> locateAcquireGroup(SRTSOCKET u, ErrorHandling erh);
+    std::shared_ptr<srt::CUDTGroup> acquireSocketsGroup(CUDTSocket* s);
 
     struct GroupKeeper
     {
-        CUDTGroup* group;
+        std::shared_ptr<CUDTGroup> group;
 
         // This is intended for API functions to lock the group's existence
         // for the lifetime of their call.

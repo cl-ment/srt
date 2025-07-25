@@ -1733,9 +1733,9 @@ bool srt::CUDT::createSrtHandshake(
     // need to be changed for some other types.
     if (have_group)
     {
-        // NOTE: See information about mutex ordering in api.h
-        ScopedLock gdrg (uglobal().m_GlobControlLock);
-        if (!m_parent->m_GroupOf)
+        std::shared_ptr<CUDTGroup> group = m_parent->m_GroupOf;
+
+        if (!group)
         {
             // This may only happen if since last check of m_GroupOf pointer the socket was removed
             // from the group in the meantime, which can only happen due to that the group was closed.
@@ -1745,7 +1745,7 @@ bool srt::CUDT::createSrtHandshake(
         }
         else
         {
-            if (m_parent->m_GroupOf->closing())
+            if (group->closing())
             {
                 m_RejectReason = SRT_REJ_IPE;
                 LOGC(cnlog.Error,
@@ -3188,7 +3188,6 @@ bool srt::CUDT::interpretGroup(const int32_t groupdata[], size_t data_size SRT_A
         return false;
     }
 
-    ScopedLock guard_group_existence (uglobal().m_GlobControlLock);
 
     if (m_SrtHsSide == HSD_INITIATOR)
     {
@@ -3199,7 +3198,7 @@ bool srt::CUDT::interpretGroup(const int32_t groupdata[], size_t data_size SRT_A
         // the same id, otherwise the connection should be rejected.
 
         // So, first check the group of the current socket and see if a peer is set.
-        CUDTGroup* pg = m_parent->m_GroupOf;
+        std::shared_ptr<CUDTGroup> pg = m_parent->m_GroupOf;
         if (!pg)
         {
             // This means that the responder has responded with a group membership,
@@ -3315,7 +3314,7 @@ SRTSOCKET srt::CUDT::makeMePeerOf(SRTSOCKET peergroup, SRT_GROUP_TYPE gtp, uint3
     // it right now so there's no need to lock s->m_ControlLock.
 
     // Check if there exists a group that this one is a peer of.
-    CUDTGroup* gp = uglobal().findPeerGroup_LOCKED(peergroup);
+    std::shared_ptr<CUDTGroup> gp = uglobal().findPeerGroup_LOCKED(peergroup);
     bool was_empty = true;
     if (gp)
     {
@@ -3336,7 +3335,7 @@ SRTSOCKET srt::CUDT::makeMePeerOf(SRTSOCKET peergroup, SRT_GROUP_TYPE gtp, uint3
     {
         try
         {
-            gp = &newGroup(gtp);
+            gp = newGroup(gtp);
         }
         catch (...)
         {
@@ -3404,7 +3403,7 @@ SRTSOCKET srt::CUDT::makeMePeerOf(SRTSOCKET peergroup, SRT_GROUP_TYPE gtp, uint3
     return gp->id();
 }
 
-void srt::CUDT::synchronizeWithGroup(CUDTGroup* gp)
+void srt::CUDT::synchronizeWithGroup(std::shared_ptr<CUDTGroup> gp)
 {
     ScopedLock gl (*gp->exp_groupLock());
 
@@ -4843,8 +4842,7 @@ EConnectStatus srt::CUDT::postConnect(const CPacket* pResponse, bool rendezvous,
 
     {
 #if ENABLE_BONDING
-        ScopedLock cl (uglobal().m_GlobControlLock);
-        CUDTGroup* g = m_parent->m_GroupOf;
+        std::shared_ptr<CUDTGroup> g = m_parent->m_GroupOf;
         if (g)
         {
             // This is the last moment when this can be done.
@@ -4950,8 +4948,7 @@ EConnectStatus srt::CUDT::postConnect(const CPacket* pResponse, bool rendezvous,
     //int token = -1;
 #if ENABLE_BONDING
     {
-        ScopedLock cl (uglobal().m_GlobControlLock);
-        CUDTGroup* g = m_parent->m_GroupOf;
+        std::shared_ptr<CUDTGroup> g = m_parent->m_GroupOf;
         if (g)
         {
             // XXX this might require another check of group type.
@@ -5914,7 +5911,7 @@ void srt::CUDT::acceptAndRespond(const sockaddr_any& agent, const sockaddr_any& 
 
     {
 #if ENABLE_BONDING
-        CUDTGroup* g = group_keeper.group;
+        std::shared_ptr<CUDTGroup> g = group_keeper.group;
         if (g)
         {
             // This is the last moment when this can be done.
@@ -8195,34 +8192,16 @@ int srt::CUDT::sendCtrlAck(CPacket& ctrlpkt, int size)
         InvertedLock un_bufflock (m_RcvBufferLock);
 
 #if ENABLE_BONDING
-        // This actually should be done immediately after the ACK pointers were
-        // updated in this socket, but it can't be done inside this function due
-        // to being run under a lock.
-
-        // At this moment no locks are applied. The only lock used so far
-        // was m_RcvBufferLock, but this was lifed above. At this moment
-        // it is safe to apply any locks here. This function is affined
-        // to CRcvQueue::worker thread, so it is free to apply locks as
-        // required in the defined order. At present we only need the lock
-        // on m_GlobControlLock to prevent the group from being deleted
-        // in the meantime
-        if (m_parent->m_GroupOf)
         {
-            // Check is first done before locking to avoid unnecessary
-            // mutex locking. The condition for this field is that it
-            // can be either never set, already reset, or ever set
-            // and possibly dangling. The re-check after lock eliminates
-            // the dangling case.
-            ScopedLock glock (uglobal().m_GlobControlLock);
-
+            std::shared_ptr<CUDTGroup> group = m_parent->m_GroupOf;
             // Note that updateLatestRcv will lock m_GroupOf->m_GroupLock,
             // but this is an intended order.
-            if (m_parent->m_GroupOf)
+            if (group)
             {
                 // A group may need to update the parallelly used idle links,
                 // should it have any. Pass the current socket position in order
                 // to skip it from the group loop.
-                m_parent->m_GroupOf->updateLatestRcv(m_parent);
+                group->updateLatestRcv(m_parent);
             }
         }
 #endif
@@ -8271,17 +8250,16 @@ int srt::CUDT::sendCtrlAck(CPacket& ctrlpkt, int size)
                 }
             }
 #if ENABLE_BONDING
-            if (group_read_seq != SRT_SEQNO_NONE && m_parent->m_GroupOf)
+            if (group_read_seq != SRT_SEQNO_NONE)
             {
-                // See above explanation for double-checking
-                ScopedLock glock (uglobal().m_GlobControlLock);
+                std::shared_ptr<CUDTGroup> group = m_parent->m_GroupOf;
 
-                if (m_parent->m_GroupOf)
+                if (group)
                 {
                     // The current "APP reader" needs to simply decide as to whether
                     // the next CUDTGroup::recv() call should return with no blocking or not.
                     // When the group is read-ready, it should update its pollers as it sees fit.
-                    m_parent->m_GroupOf->updateReadState(m_SocketID, group_read_seq);
+                    group->updateReadState(m_SocketID, group_read_seq);
                 }
             }
 #endif
@@ -8386,7 +8364,7 @@ void srt::CUDT::updateSndLossListOnACK(int32_t ackdata_seqno)
     // This is for the call of CSndBuffer::getMsgNoAt that returns
     // this value as a notfound-trap.
     int32_t msgno_at_last_acked_seq = SRT_MSGNO_CONTROL;
-    bool is_group = m_parent->m_GroupOf;
+    bool is_group = m_parent->m_GroupOf != NULL;
 #endif
 
     // Update sender's loss list and acknowledge packets in the sender's buffer
@@ -8431,8 +8409,8 @@ void srt::CUDT::updateSndLossListOnACK(int32_t ackdata_seqno)
     {
         // m_RecvAckLock is ordered AFTER m_GlobControlLock, so this can only
         // be done now that m_RecvAckLock is unlocked.
-        ScopedLock glock (uglobal().m_GlobControlLock);
-        if (m_parent->m_GroupOf)
+        std::shared_ptr<CUDTGroup> group = m_parent->m_GroupOf;
+        if (group)
         {
             HLOGC(inlog.Debug, log << CONID() << "ACK: acking group sender buffer for #" << msgno_at_last_acked_seq);
 
@@ -8441,11 +8419,11 @@ void srt::CUDT::updateSndLossListOnACK(int32_t ackdata_seqno)
             // because this function is also called from CUDT::sndDropTooLate
             // called from CUDT::sendmsg2 called from CUDTGroup::send, which
             // applies the lock on m_GroupLock already.
-            ScopedLock glk (*m_parent->m_GroupOf->exp_groupLock());
+            ScopedLock glk (*group->exp_groupLock());
 
             // NOTE: ackMessage also accepts and ignores the trap representation
             // which is SRT_MSGNO_CONTROL.
-            m_parent->m_GroupOf->ackMessage(msgno_at_last_acked_seq);
+            group->ackMessage(msgno_at_last_acked_seq);
         }
     }
 #endif
@@ -8589,15 +8567,12 @@ void srt::CUDT::processCtrlAck(const CPacket &ctrlpkt, const steady_clock::time_
     // END of the new code with TLPKTDROP
     //
 #if ENABLE_BONDING
-    if (m_parent->m_GroupOf)
+    std::shared_ptr<CUDTGroup> group = m_parent->m_GroupOf;
+    if (group)
     {
-        ScopedLock glock (uglobal().m_GlobControlLock);
-        if (m_parent->m_GroupOf)
-        {
-            // Will apply m_GroupLock, ordered after m_GlobControlLock.
-            // m_GlobControlLock is necessary for group existence.
-            m_parent->m_GroupOf->updateWriteState();
-        }
+        // Will apply m_GroupLock, ordered after m_GlobControlLock.
+        // m_GlobControlLock is necessary for group existence.
+        group->updateWriteState();
     }
 #endif
 
@@ -8812,14 +8787,14 @@ void srt::CUDT::processCtrlAckAck(const CPacket& ctrlpkt, const time_point& tsAr
     if (m_config.bDriftTracer)
     {
 #if ENABLE_BONDING
-        ScopedLock glock(uglobal().m_GlobControlLock); // XXX not too excessive?
         const bool drift_updated =
 #endif
         m_pRcvBuffer->addRcvTsbPdDriftSample(ctrlpkt.getMsgTimeStamp(), tsArrival, rtt);
 
 #if ENABLE_BONDING
-        if (drift_updated && m_parent->m_GroupOf)
-            m_parent->m_GroupOf->synchronizeDrift(this);
+        std::shared_ptr<CUDTGroup> group = m_parent->m_GroupOf;
+        if (drift_updated && group)
+            group->synchronizeDrift(this);
 #endif
     }
 
@@ -9356,13 +9331,10 @@ void srt::CUDT::updateAfterSrtHandshake(int hsv)
 #if ENABLE_BONDING
     string grpspec;
 
-    if (m_parent->m_GroupOf)
-    {
-        ScopedLock glock (uglobal().m_GlobControlLock);
-        grpspec = m_parent->m_GroupOf
-            ? " group=$" + Sprint(m_parent->m_GroupOf->id())
-            : string();
-    }
+    std::shared_ptr<CUDTGroup> group = m_parent->m_GroupOf;
+    grpspec = group
+        ? " group=$" + Sprint(group->id())
+        : string();
 #else
     const char* grpspec = "";
 #endif
@@ -10512,7 +10484,6 @@ int srt::CUDT::processData(CUnit* in_unit)
     // reception sequence pointer stating that this link is not receiving.
     if (m_parent->m_GroupOf)
     {
-        ScopedLock protect_group_existence (uglobal().m_GlobControlLock);
         groups::SocketData* gi = m_parent->m_GroupMemberData;
 
         // This check is needed as after getting the lock the socket
@@ -11718,17 +11689,13 @@ void srt::CUDT::checkTimers()
     {
         sendCtrl(UMSG_KEEPALIVE);
 #if ENABLE_BONDING
-        if (m_parent->m_GroupOf)
+        std::shared_ptr<CUDTGroup> group = m_parent->m_GroupOf;
+        if (group)
         {
-            ScopedLock glock (uglobal().m_GlobControlLock);
-            if (m_parent->m_GroupOf)
-            {
-                // Pass socket ID because it's about changing group socket data
-                m_parent->m_GroupOf->internalKeepalive(m_parent->m_GroupMemberData);
+                group->internalKeepalive(m_parent->m_GroupMemberData);
                 // NOTE: GroupLock is unnecessary here because the only data read and
                 // modified is the target of the iterator from m_GroupMemberData. The
                 // iterator will be valid regardless of any container modifications.
-            }
         }
 #endif
         HLOGP(xtlog.Debug, "KEEPALIVE");
@@ -11752,8 +11719,8 @@ void srt::CUDT::completeBrokenConnectionDependencies(int errorcode)
 #if ENABLE_BONDING
     bool pending_broken = false;
     {
-        ScopedLock guard_group_existence (uglobal().m_GlobControlLock);
-        if (m_parent->m_GroupOf)
+        std::shared_ptr<CUDTGroup> group = m_parent->m_GroupOf;
+        if (group)
         {
             token = m_parent->m_GroupMemberData->token;
             if (m_parent->m_GroupMemberData->sndstate == SRT_GST_PENDING)
@@ -11787,8 +11754,7 @@ void srt::CUDT::completeBrokenConnectionDependencies(int errorcode)
         // existence of the group will not be changed during
         // the operation. The attempt of group deletion will
         // have to wait until this operation completes.
-        ScopedLock lock(uglobal().m_GlobControlLock);
-        CUDTGroup* pg = m_parent->m_GroupOf;
+        std::shared_ptr<CUDTGroup> pg = m_parent->m_GroupOf;
         if (pg)
         {
             // Bound to one call because this requires locking
@@ -12038,22 +12004,18 @@ void srt::CUDT::processKeepalive(const CPacket& ctrlpkt, const time_point& tsArr
     // for extra data sent through keepalive.
 
 #if ENABLE_BONDING
-    if (m_parent->m_GroupOf)
+    // Lock GlobControlLock in order to make sure that
+    // the state of the socket having the group and the
+    // existence of the group will not be changed during
+    // the operation. The attempt of group deletion will
+    // have to wait until this operation completes.
+    std::shared_ptr<CUDTGroup> pg = m_parent->m_GroupOf;
+    if (pg)
     {
-        // Lock GlobControlLock in order to make sure that
-        // the state of the socket having the group and the
-        // existence of the group will not be changed during
-        // the operation. The attempt of group deletion will
-        // have to wait until this operation completes.
-        ScopedLock lock(uglobal().m_GlobControlLock);
-        CUDTGroup* pg = m_parent->m_GroupOf;
-        if (pg)
-        {
-            // Whether anything is to be done with this socket
-            // about the fact that keepalive arrived, let the
-            // group handle it
-            pg->processKeepalive(m_parent->m_GroupMemberData);
-        }
+        // Whether anything is to be done with this socket
+        // about the fact that keepalive arrived, let the
+        // group handle it
+        pg->processKeepalive(m_parent->m_GroupMemberData);
     }
 #endif
 
