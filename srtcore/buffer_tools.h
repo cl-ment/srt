@@ -225,7 +225,7 @@ class CShaper
     void setBitrate(double bw) { if (bw != m_bitrate) { m_bitrate = bw ; updateMaxTokens(); }}
     void setBurstPeriod(double bp) { if (bp != m_burstPeriod) { m_burstPeriod = bp ; updateMaxTokens(); }}
     bool check(double len) { return len > m_tokens; }
-    void tick(const time_point &now) { double delta = (double) count_microseconds(now - m_time); m_time = now ; setTokens((m_bitrate * delta) / (SHAPER_UNIT * SHAPER_RESOLUTION));}
+    void tick(const time_point &now) { double delta = (double) count_microseconds(now - m_time); m_time = now ; setTokens(m_tokens + ((m_bitrate * delta) / (SHAPER_UNIT * SHAPER_RESOLUTION)));}
     void update(double len) { setTokens(m_tokens - len); }
 };
 } // namespace srt
