@@ -1010,6 +1010,7 @@ private: // Receiving related data
 public:
     static int installAcceptHook(SRTSOCKET lsn, srt_listen_callback_fn* hook, void* opaq);
     static int installConnectHook(SRTSOCKET lsn, srt_connect_callback_fn* hook, void* opaq);
+    static HandshakeSide computeCookieContest(int32_t reqCookie, int32_t resCookie);
 private:
     void installAcceptHook(srt_listen_callback_fn* hook, void* opaq)
     {

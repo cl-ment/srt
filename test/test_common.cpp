@@ -5,6 +5,7 @@
 #include "test_env.h"
 #include "utilities.h"
 #include "common.h"
+#include "core.h"
 
 using namespace srt;
 
@@ -70,4 +71,35 @@ TEST(CIPAddress, IPv4_in_IPv6_pton)
     const uint32_t ip[4]   = {0, 0, htobe32(0x0000FFFF), htobe32(0xC0A80001)};
 
     test_cipaddress_pton(peer_ip, AF_INET6, ip);
+}
+
+
+TEST(Common, CookieContest)
+{
+    srt::TestInit srtinit;
+    using namespace std;
+
+    srt_setloglevel(LOG_NOTICE);
+
+    cout << "TEST 1: two easy comparable values\n";
+    EXPECT_EQ(CUDT::computeCookieContest(100, 50), HSD_INITIATOR);
+    EXPECT_EQ(CUDT::computeCookieContest(50, 100), HSD_RESPONDER);
+
+    EXPECT_EQ(CUDT::computeCookieContest(-1, -1000), HSD_INITIATOR);
+    EXPECT_EQ(CUDT::computeCookieContest(-1000, -1), HSD_RESPONDER);
+
+    EXPECT_EQ(CUDT::computeCookieContest(10055, -10000), HSD_INITIATOR);
+    EXPECT_EQ(CUDT::computeCookieContest(-10000, 10055), HSD_RESPONDER);
+    // Values from PR 1517
+    cout << "TEST 2: Values from PR 1517\n";
+    EXPECT_EQ(CUDT::computeCookieContest(811599203, -1480577720), HSD_INITIATOR);
+    EXPECT_EQ(CUDT::computeCookieContest(-1480577720, 811599203), HSD_RESPONDER);
+
+    EXPECT_EQ(CUDT::computeCookieContest(2147483647, -2147483648), HSD_INITIATOR);
+    EXPECT_EQ(CUDT::computeCookieContest(-2147483648, 2147483647), HSD_RESPONDER);
+
+    cout << "TEST 3: wrong post-fix\n";
+    // NOTE: 0x80000001 is a negative number in hex
+    EXPECT_EQ(CUDT::computeCookieContest(0x00000001, 0x80000001), HSD_INITIATOR);
+    EXPECT_EQ(CUDT::computeCookieContest(0x80000001, 0x00000001), HSD_RESPONDER);
 }
