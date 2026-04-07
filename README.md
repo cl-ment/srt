@@ -11,7 +11,6 @@
 [![License: MPLv2.0][license-badge]](./LICENSE)
 [![Latest release][release-badge]][github releases]
 [![codecov][codecov-badge]][codecov-project]
-[![Build Status Linux and macOS][travis-badge]][travis]
 [![Build Status Windows][appveyor-badge]][appveyor]
 
 [![Ubuntu 24.04][Ubuntu-badge]][Ubuntu-package]
@@ -216,8 +215,6 @@ By contributing code to the SRT project, you agree to license your contribution 
 
 [appveyor-badge]: https://img.shields.io/appveyor/ci/Haivision/srt/master.svg?label=Windows
 [appveyor]: https://ci.appveyor.com/project/Haivision/srt
-[travis-badge]: https://img.shields.io/travis/Haivision/srt/master.svg?label=Linux/macOS
-[travis]: https://travis-ci.org/Haivision/srt
 [license-badge]: https://img.shields.io/badge/License-MPLv2.0-blue
 
 [Vcpkg-package]: https://repology.org/project/srt/versions
