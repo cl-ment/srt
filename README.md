@@ -233,10 +233,10 @@ By contributing code to the SRT project, you agree to license your contribution 
 [debian-package]: https://packages.debian.org/testing/libs/libsrt1.5-gnutls
 
 [fedora-package]: https://repology.org/project/srt/versions
-[fedora-badge]: https://repology.org/badge/version-for-repo/fedora_37/srt.svg
+[fedora-badge]: https://repology.org/badge/version-for-repo/fedora_43/srt.svg
 
 [homebrew-package]: https://repology.org/project/srt/versions
 [homebrew-badge]: https://repology.org/badge/version-for-repo/homebrew/srt.svg
 
 [Ubuntu-package]: https://repology.org/project/srt/versions
-[Ubuntu-badge]: https://repology.org/badge/version-for-repo/ubuntu_24_04/srt.svg
+[Ubuntu-badge]: https://repology.org/badge/version-for-repo/ubuntu_26_04/srt.svg
