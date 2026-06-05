@@ -234,16 +234,6 @@ int srt::CCryptoControl::processSrtMsg_KMREQ(
             m_iCryptoMode = bUseGCM ? CSrtConfig::CIPHER_MODE_AES_GCM : CSrtConfig::CIPHER_MODE_AES_CTR;
             HLOGC(cnlog.Debug, log << "processSrtMsg_KMREQ: created RX ENC with KeyLen=" << m_iRcvKmKeyLen);
         }
-        else if (m_CurrentKey != EK_NOENC) // Received at least 1 encrypted packet
-        {
-            // HaiCrypt_GetKeyIndex returns 0 or 1 as key index or -1 as error; so
-            // adding 1 results in 1, 2 and 0 respectively, which correspond to
-            // EK_EVEN, EK_ODD and EK_NOENC respectively, the latter being an error.
-            int keyindex = HaiCrypt_GetKeyIndex(m_hRcvCrypto, kmdata) + 1;
-
-            if (keyindex == EK_NOENC || keyindex != m_CurrentKey)
-                goto Error; // Will result in BADSECRET
-        }
 
         // We have both sides set with password, so both are pending for security
         int rc = HaiCrypt_Rx_Process(m_hRcvCrypto, kmdata, bytelen, NULL, NULL, 0);
