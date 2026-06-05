@@ -411,14 +411,23 @@ TEST_F(CryptoCtr, WrongPassphraseAtInitialReachesBadSecret)
     std::array<uint32_t, 72> km_nworder;
     NtoHLA(km_nworder.data(), reinterpret_cast<const uint32_t*>(kmmsg), km_len);
 
+    const SRT_KM_STATE prev_state = fresh.m_RcvKmState;
+
     uint32_t kmout[72];
     size_t kmout_len = 72;
-    fresh.processSrtMsg_KMREQ(km_nworder.data(), km_len, 5, SrtVersion(1, 5, 3),
+    int cmd = fresh.processSrtMsg_KMREQ(km_nworder.data(), km_len, 5, SrtVersion(1, 5, 3),
             kmout, kmout_len);
 
     // The guard must NOT block this transition: from SECURING the state
     // must reach BADSECRET so the connection can be rejected.
-    EXPECT_EQ(fresh.m_RcvKmState, SRT_KM_S_BADSECRET);
+    // XXX NOTE: The behavior has been changed and now KMREQ failure is
+    // simply ignored, if it was done as update. And as we create the
+    // crypto with init, this is initialized just like through handshake,
+    // so this KMREQ is considered a KMX update. We have then the right
+    // state in the output array, but the state remains secure.
+    EXPECT_EQ(fresh.m_RcvKmState, prev_state);
+    EXPECT_EQ(cmd, SRT_CMD_NONE);
+    EXPECT_EQ(kmout[0], SRT_KM_S_BADSECRET);
 }
 
 // Regression test: a fresh KMREQ wrapped with the SAME passphrase
