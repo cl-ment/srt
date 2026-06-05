@@ -10714,6 +10714,7 @@ int srt::CUDT::handleSocketPacketReception(const vector<CUnit*>& incoming, bool&
             }
         }
 
+        bool decrypt_successful = false;
         const int buffer_add_result = m_pRcvBuffer->insert(u);
         if (buffer_add_result < 0)
         {
@@ -10774,8 +10775,12 @@ int srt::CUDT::handleSocketPacketReception(const vector<CUnit*>& incoming, bool&
                     }
 #endif
                 }
+                else
+                {
+                    decrypt_successful = true;
+                }
             }
-            else if (m_pCryptoControl && m_pCryptoControl->m_RcvKmState == SRT_KM_S_SECURED)
+            else if (m_pCryptoControl && m_pCryptoControl->m_RcvKmState != SRT_KM_S_UNSECURED)
             {
                 // Unencrypted packets are not allowed.
                 const int iDropCnt = m_pRcvBuffer->dropMessage(u->m_Packet.getSeqNo(), u->m_Packet.getSeqNo(), SRT_MSGNO_NONE, CRcvBuffer::DROP_EXISTING);
@@ -10854,6 +10859,10 @@ int srt::CUDT::handleSocketPacketReception(const vector<CUnit*>& incoming, bool&
         if (CSeqNo::seqcmp(rpkt.seqno(), m_iRcvCurrSeqNo) > 0)
         {
             m_iRcvCurrSeqNo = rpkt.seqno(); // Latest possible received
+            if (decrypt_successful && m_pCryptoControl)
+            {
+                m_pCryptoControl->m_CurrentKey = rpkt.getMsgCryptoFlags();
+            }
         }
         else
         {
