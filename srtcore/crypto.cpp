@@ -250,32 +250,32 @@ int srt::CCryptoControl::processSrtMsg_KMREQ(
         }
         else
         {
-            SRT_KM_STATE failstate;
             switch(rc)
             {
             case HAICRYPT_ERROR_WRONG_SECRET: //Unmatched shared secret to decrypt wrapped key
-                failstate = SRT_KM_S_BADSECRET;
+                failure_state = SRT_KM_S_BADSECRET;
                 //Send status KMRSP message to tel error
                 LOGC(cnlog.Warn, log << "KMREQ/rcv: (snd) Rx process failure - BADSECRET");
                 break;
             case HAICRYPT_ERROR_CIPHER:
 #ifdef ENABLE_AEAD_API_PREVIEW
-                failstate = SRT_KM_S_BADCRYPTOMODE;
+                failure_state = SRT_KM_S_BADCRYPTOMODE;
 #else
-                failstate = SRT_KM_S_BADSECRET; // Use "bad secret" as a fallback.
+                failure_state = SRT_KM_S_BADSECRET; // Use "bad secret" as a fallback.
 #endif
                 LOGC(cnlog.Warn, log << "KMREQ/rcv: (snd) Rx process failure - BADCRYPTOMODE");
                 break;
             case HAICRYPT_ERROR: //Other errors
             default:
-                failstate = SRT_KM_S_NOSECRET;
+                failure_state = SRT_KM_S_NOSECRET;
                 LOGC(cnlog.Warn, log << "KMREQ/rcv: (snd) Rx process failure (IPE) - NOSECRET");
                 break;
             }
 
-            if (!kmx_update) // DO NOT change any state if it was KMX update.
+            if (!kmx_update)
             {
-                m_RcvKmState = m_SndKmState = failstate;
+                // Only initially, set this also to SND state.
+                m_SndKmState = failure_state;
             }
             goto Error;
         }
@@ -348,8 +348,7 @@ Error: // CATCH POINT
     if (!kmx_update)
     {
         // Set the appropriate error, if it wasn't already set before 
-        if (m_RcvKmState == SRT_KM_S_SECURING)
-            m_RcvKmState = failure_state;
+        m_RcvKmState = failure_state;
         if (bidirectional && hasPassphrase())
         {
             // If the Forward KMX process has failed, the reverse-KMX process was not done at all.
