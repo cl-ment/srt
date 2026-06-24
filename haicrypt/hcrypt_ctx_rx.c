@@ -180,12 +180,14 @@ int hcryptCtx_Rx_ParseKM(hcrypt_Session *crypto, unsigned char *km_msg, size_t m
 	 * Regenerate KEK if it is password derived
 	 * and Salt or SEK length changed
 	 */
+	int rollback_kek = 0;
 	if (new_ctx.cfg.pwd_len && do_pbkdf) {
 		if (hcryptCtx_GenSecret(crypto, &new_ctx)) {
 			return(-1);
 		}
 		new_ctx.status = HCRYPT_CTX_S_SARDY;
 		kek_len = sek_len;	/* KEK changed */
+		rollback_kek = 1;
 	}
 
 	/* Unwrap SEK(s) and set in context */
@@ -194,7 +196,13 @@ int hcryptCtx_Rx_ParseKM(hcrypt_Session *crypto, unsigned char *km_msg, size_t m
 			&km_msg[HCRYPT_MSG_KM_OFS_SALT + salt_len], msglen);
 
 	if (wrc < 0) {
-		HCRYPT_LOG(LOG_WARNING, "%s", "unwrap key failed\n");
+		HCRYPT_LOG(LOG_WARNING, "%s%s\n", "unwrap key failed - internal KEK: ", rollback_kek ? "ROLLBACK" : "unchanged");
+		// Rollback the call to hcryptCtx_GenSecret done on the new_ctx,
+		// and restore the old secret from old ctx. GenSecret is required by
+		// km_unwrap, but only after failed call we know this should remain unchanged.
+		if (rollback_kek) {
+			hcryptCtx_GenSecret(crypto, ctx);
+		}
 		return(-2); //Report unmatched shared secret
 	}
     *ctx = new_ctx;
