@@ -389,8 +389,9 @@ void CUDT::construct()
     m_iSndHsRetryCnt = SRT_MAX_HSRETRY + 1;
 
     m_PeerID              = SRT_SOCKID_CONNREQ;
+    m_State               = CUDT::SSS_INIT;
     m_bOpened             = false;
-    m_bListening          = false;
+    //m_bListening          = false;
     m_bConnecting         = false;
     m_bConnected          = false;
     m_bClosing            = false;
@@ -560,7 +561,8 @@ void CUDT::setOpt(SRT_SOCKOPT optName, const void* optval, int optlen)
     if (IsSet(oflags, SRTO_R_PREBIND) && m_bOpened)
         throw CUDTException(MJ_NOTSUP, MN_ISBOUND, 0);
 
-    if (IsSet(oflags, SRTO_R_PRE) && (m_bConnected || m_bConnecting || m_bListening))
+    // TO_REMOVE if (IsSet(oflags, SRTO_R_PRE) && (m_bConnected || m_bConnecting || m_bListening))
+    if (IsSet(oflags, SRTO_R_PRE) && (m_State != CUDT::SSS_INIT))
         throw CUDTException(MJ_NOTSUP, MN_ISCONNECTED, 0);
 
     // Option execution. If this returns -1, there's no such option.
@@ -1146,13 +1148,14 @@ void CUDT::setListenState()
     // If it was called ever once, none will pass.
     for (;;)
     {
-        if (m_bListening.compare_exchange(false, true))
+        // TO _REMOVE if (m_bListening.compare_exchange(false, true))
+        if (m_State.compare_exchange(CUDT::SSS_INIT, CUDT::SSS_LISTENING))
         {
             // if there is already another socket listening on the same port
             if (!m_pMuxer->setListener(this))
             {
                 // Failed here, so 
-                m_bListening = false;
+                m_State = CUDT::SSS_INIT;
                 throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
             }
         }
@@ -3688,12 +3691,23 @@ void CUDT::startConnect(const sockaddr_any& serv_addr, int32_t forced_isn)
     if (!m_bOpened)
         throw CUDTException(MJ_NOTSUP, MN_NONE, 0);
 
+#ifdef TO_REMOVE
     if (m_bListening)
         throw CUDTException(MJ_NOTSUP, MN_ISCONNECTED, 0);
 
     if (m_bConnecting || m_bConnected)
         throw CUDTException(MJ_NOTSUP, MN_ISCONNECTED, 0);
-
+#endif 
+    switch (m_State)
+    {
+        case CUDT::SSS_LISTENING:
+            throw CUDTException(MJ_NOTSUP, MN_ISCONNECTED, 0);
+        case CUDT::SSS_CONNECTING:
+        case CUDT::SSS_CONNECTED:
+            throw CUDTException(MJ_NOTSUP, MN_ISCONNECTED, 0);
+        default: 
+            break;
+    }
     m_PeerAddr = serv_addr;
     // register this socket in the rendezvous queue
     // RendezevousQueue is used to temporarily store incoming handshake, non-rendezvous connections also require this
@@ -6487,7 +6501,52 @@ bool CUDT::closeEntity(int reason) ATR_NOEXCEPT
     releaseSynch();
 
     HLOGC(smlog.Debug, log << CONID() << "CLOSING, removing from listener/connector");
+    switch (m_State)
+    {
+        case CUDT::SSS_LISTENING:
+            {
+                bool removed SRT_ATR_UNUSED = m_pMuxer->removeListener(this);
+                // NOTE: removeListener removes this socket as listener in the multiplexer,
+                // but DOES NOT remove the socket from the multiplerxer (YET).
+                if (!removed)
+                {
+                    LOGC(smlog.Error, log << CONID() << "CLOSING: IPE: listening=true but listener removal failed!");
+                }
 
+            }
+            break;
+        case CUDT::SSS_CONNECTING:
+            m_pMuxer->removeConnector(m_SocketID);
+            break;
+        case CUDT::SSS_CONNECTED:
+            {
+                if (!m_bShutdown)
+                {
+                    HLOGC(smlog.Debug, log << CONID() << "CLOSING - sending SHUTDOWN to the peer @" << m_PeerID);
+                    int32_t shdata[1] = { reason };
+                    sendCtrl(UMSG_SHUTDOWN, NULL, shdata, sizeof shdata);
+                }
+
+                // Store current connection information.
+                CInfoBlock ib;
+                ib.m_iIPversion = m_PeerAddr.family();
+                CInfoBlock::convert(m_PeerAddr, ib.m_piIP);
+                ib.m_iSRTT      = m_iSRTT;
+                ib.m_iBandwidth = m_iBandwidth;
+                m_pCache->update(&ib);
+
+#if SRT_DEBUG_RTT
+                s_rtt_trace.trace(steady_clock::now(), "Cache", -1, -1,
+                        m_bIsFirstRTTReceived, -1, m_iSRTT, -1);
+#endif
+            }
+            break;
+        default: 
+            break;
+    }
+    m_State = CUDT::SSS_CLOSING;
+
+#ifdef TO_REMOVE
     if (m_bListening)
     {
         m_bListening = false;
@@ -6528,7 +6587,7 @@ bool CUDT::closeEntity(int reason) ATR_NOEXCEPT
 
         m_bConnected = false;
     }
-
+#endif 
     HLOGC(smlog.Debug, log << CONID() << "closeEntity: joining send/receive threads");
 
     // waiting all send and recv calls to stop
@@ -12498,6 +12557,50 @@ void CUDT::addEPoll(const int eid)
     m_sPollID.insert(eid);
     uglobal().m_EPoll.m_EPollLock.unlock();
 
+    switch (m_State)
+    {
+        case CUDT::SSS_LISTENING:
+            {
+                // A listener socket can only get readiness on SRT_EPOLL_ACCEPT
+                // (which has the same value as SRT_EPOLL_IN), or sometimes
+                // also SRT_EPOLL_UPDATE. All interesting fields for that purpose
+                // are contained in the CUDTSocket class, so redirect there.
+
+                // NOTE: m_GlobControlLock is required here, but it's already applied
+                // on this function (see CUDTUnited::epoll_add_usock_INTERNAL)
+                SRT_EPOLL_T events = m_parent->getListenerEvents();
+
+                // Only light up the events that were returned, do nothing if none is ready,
+                // the "no event" state is the default.
+                if (events)
+                    uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, events, true);
+
+                // You don't check anything else here - a listener socket can be only
+                // used for listening and nothing else.
+            }
+            break;
+
+        case CUDT::SSS_CONNECTED:
+            {
+                m_RecvLock.lock();
+                // Never update sockets with no receiver buffer; they are member sockets
+                // and the group owns the buffer.
+                if (m_pRcvBuffer && isRcvBufferReady())
+                {
+                    uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, SRT_EPOLL_IN, true);
+                }
+                m_RecvLock.unlock();
+
+                if (m_config.iSndBufSize > m_pSndBuffer->getCurrBufSize())
+                {
+                    uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, SRT_EPOLL_OUT, true);
+                }
+            }
+            break;
+        default:
+            break;
+    }
+#ifdef TO_REMOVE
     if (m_bListening)
     {
         // A listener socket can only get readiness on SRT_EPOLL_ACCEPT
@@ -12535,6 +12638,7 @@ void CUDT::addEPoll(const int eid)
     {
         uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, SRT_EPOLL_OUT, true);
     }
+#endif
 }
 
 void CUDT::removeEPollEvents(const int eid)

@@ -192,6 +192,20 @@ bool CUDTSocket::readReady() const
     if (m_GroupOf)
         return false;
 #endif
+    switch (m_UDT.m_State)
+    {
+        case CUDT::SSS_CONNECTED:
+            return m_UDT.isRcvBufferReady();
+        case CUDT::SSS_LISTENING:
+            return !m_QueuedSockets.empty();
+        case CUDT::SSS_BROKEN:
+            return true;
+        default: return false;
+
+
+            
+    }
+#ifdef TO_REMOVE
     if (m_UDT.m_bConnected && m_UDT.isRcvBufferReady())
         return true;
 
@@ -199,6 +213,7 @@ bool CUDTSocket::readReady() const
         return !m_QueuedSockets.empty();
 
     return broken();
+#endif 
 }
 
 bool CUDTSocket::writeReady() const
@@ -2508,7 +2523,7 @@ void CUDTSocket::breakNonAcceptedSockets()
     // sockets that have not been extracted as accepted.
 
     vector<SRTSOCKET> accepted;
-    if (m_UDT.m_bListening)
+    if (m_UDT.m_State == CUDT::SSS_LISTENING)
     {
         HLOGC(smlog.Debug, log << "breakNonAcceptedSockets: @" << m_UDT.id() << " CHECKING ACCEPTED LEAKS:");
         ScopedLock lk (m_AcceptLock);
@@ -2631,8 +2646,7 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason)
         // without a multiplexer and we have a guarantee it will not be reused
         // for a long enough time. Worst case scenario, it won't be dispatched
         // to a multiplexer - already under a lock, of course.
-        s->core().notListening();
-
+        s->core().m_State = CUDT::SSS_CLOSING;
         {
             // Need to protect the existence of the multiplexer.
             // Multiple threads are allowed to dispose it and only
@@ -3035,8 +3049,11 @@ int CUDTUnited::selectEx(const vector<SRTSOCKET>& fds,
 
             if (readfds)
             {
+#ifdef TO_REMOVE
                 if ((s->core().m_bConnected && s->core().isRcvBufferReady()) ||
                     (s->core().m_bListening && (s->m_QueuedSockets.size() > 0)))
+#endif
+                if (s->readReady())
                 {
                     readfds->push_back(s->id());
                     ++count;

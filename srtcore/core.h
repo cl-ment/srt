@@ -294,6 +294,22 @@ class CUDT
     friend class CUDTGroup;
     friend class TestMockCUDT; // unit tests
 
+    enum SRTSocketState 
+    {
+        SSS_INIT,
+        SSS_LISTENING,
+        SSS_CONNECTING,
+        SSS_CONNECTED,
+        SSS_CLOSING,
+        SSS_SHUTDOWN,
+        SSS_BREAKING,
+        SSS_BROKEN,
+        SSS_BREAK_AS_UNSTABLE,
+        SSS_PEER_HEALTH,
+        SSS_MANAGED,
+        SSS_OPENED,
+    };
+
     typedef sync::steady_clock::time_point time_point;
     typedef sync::steady_clock::duration duration;
     typedef sync::AtomicClock<sync::steady_clock> atomic_time_point;
@@ -578,7 +594,7 @@ public: // internal API
     // immediately to free the socket
     int notListening()
     {
-        m_bListening = false;
+        // TO REMOVE m_bListening = false;
         m_pMuxer->removeListener(this);
         return m_pMuxer->id();
     }
@@ -1031,7 +1047,10 @@ private:
     void EmitSignal(ETransmissionEvent tev, EventVariant var);
 
     // Internal state
+    sync::atomic<enum SRTSocketState> m_State;
+#if 0
     sync::atomic<bool> m_bListening;             // If the UDT entity is listening to connection
+#endif 
     sync::atomic<bool> m_bConnecting;            // The short phase when connect() is called but not yet completed
     sync::atomic<bool> m_bConnected;             // Whether the connection is on or off
     sync::atomic<bool> m_bClosing;               // If the UDT entity is closing
@@ -1041,8 +1060,8 @@ private:
     sync::atomic<bool> m_bBreakAsUnstable;       // A flag indicating that the socket should become broken because it has been unstable for too long.
     sync::atomic<bool> m_bPeerHealth;            // If the peer status is normal
     sync::atomic<bool> m_bManaged;               // The socket should be closed automatically if broken
+    sync::atomic<bool> m_bOpened;                // If the UDT entity has been opened
     sync::atomic<int> m_RejectReason;
-
     // If the socket was closed by some reason locally, the reason is
     // in m_AgentCloseReason and the m_PeerCloseReason is then SRT_CLS_UNKNOWN.
     // If the socket was closed due to reception of UMSG_SHUTDOWN, the reason
@@ -1051,7 +1070,6 @@ private:
     sync::atomic<int> m_AgentCloseReason;
     sync::atomic<int> m_PeerCloseReason;
     atomic_time_point m_CloseTimeStamp;    // Time when the close reason was first set
-    sync::atomic<bool> m_bOpened;                              // If the UDT entity has been opened
                                                  // A counter (number of GC checks happening every 1s) to let the GC tag this socket as closed.   
     sync::atomic<int> m_iBrokenCounter;          // If a broken socket still has data in the receiver buffer, it is not marked closed until the counter is 0.
 
@@ -1242,7 +1260,8 @@ public:
 private:
     void installAcceptHook(srt_listen_callback_fn* hook, void* opaq)
     {
-        if (m_bConnected || m_bConnecting || m_bListening || m_bBroken)
+        //if (m_bConnected || m_bConnecting || m_bListening || m_bBroken)
+        if (m_State != SSS_INIT)
             throw CUDTException(MJ_NOTSUP, MN_ISCONNECTED, 0);
 
         m_cbAcceptHook.set(opaq, hook);
@@ -1250,7 +1269,8 @@ private:
 
     void installConnectHook(srt_connect_callback_fn* hook, void* opaq)
     {
-        if (m_bConnected || m_bConnecting || m_bListening || m_bBroken)
+        //if (m_bConnected || m_bConnecting || m_bListening || m_bBroken)
+        if (m_State != SSS_INIT)
             throw CUDTException(MJ_NOTSUP, MN_ISCONNECTED, 0);
 
         m_cbConnectHook.set(opaq, hook);
