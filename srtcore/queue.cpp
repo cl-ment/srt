@@ -753,7 +753,8 @@ void CSndQueue::workerSendOrder()
                     << UST(Opened));
 #undef UST
 
-            if (!u.m_bConnected || u.m_bBroken || u.m_bClosing)
+            // TO_REMOVE if (!u.m_bConnected || u.m_bBroken || u.m_bClosing)
+            if (u.m_State != CUDT::SSS_CONNECTED)
             {
                 HLOGC(qslog.Debug, log << "Socket to be processed is already broken, not packing");
                 m_SendOrderList.remove(runner); // [TSA] IDEM
@@ -2310,7 +2311,8 @@ void CMultiplexer::rollUpdateSockets(const sync::steady_clock::time_point& curti
 
             CUDT* u = &point->m_pSocket->core();
 
-            if (u->m_bConnected && !u->m_bBroken && !u->m_bClosing)
+            // TO_REMOVE if (u->m_bConnected && !u->m_bBroken && !u->m_bClosing)
+            if (u->m_State != CUDT::SSS_CONNECTED)
             {
                 // Lock the sockets being collected here to prevent unexpected deletion
                 // SYMMETRY is ensured by adding them to this container.

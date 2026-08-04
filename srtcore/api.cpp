@@ -219,12 +219,23 @@ bool CUDTSocket::readReady() const
 
 bool CUDTSocket::writeReady() const
 {
-    return (m_UDT.m_bConnected && (m_UDT.m_pSndBuffer->getCurrBufSize() < m_UDT.m_config.iSndBufSize)) || broken();
+    switch (m_UDT.m_State)
+    {
+        case CUDT::SSS_CONNECTED:
+            return (m_UDT.m_pSndBuffer->getCurrBufSize() < m_UDT.m_config.iSndBufSize);
+        case CUDT::SSS_BROKEN:
+            // TODO maybe add SSS_CLOSING and SSS_CLOSE
+            return true;
+        default: 
+            return false;
+    }
+    // TO_REMOVE return (m_UDT.m_bConnected && (m_UDT.m_pSndBuffer->getCurrBufSize() < m_UDT.m_config.iSndBufSize)) || broken();
 }
 
 bool CUDTSocket::broken() const
 {
-    return m_UDT.m_bBroken || !m_UDT.m_bConnected;
+    // TO_REMOVE return m_UDT.m_bBroken || !m_UDT.m_bConnected;
+    return m_UDT.m_State == CUDT::SSS_BROKEN;
 }
 
 
@@ -2836,7 +2847,8 @@ void CUDTUnited::getpeername(const SRTSOCKET u, sockaddr* pw_name, int* pw_namel
     if (!s)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
 
-    if (!s->core().m_bConnected || s->core().m_bBroken)
+    // TO_REMOVE if (!s->core().m_bConnected || s->core().m_bBroken)
+    if (s->core().m_State != CUDT::SSS_CONNECTED)
         throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
 
     const int len = s->m_PeerAddr.size();
@@ -3065,8 +3077,8 @@ int CUDTUnited::selectEx(const vector<SRTSOCKET>& fds,
 
             if (writefds)
             {
-                if (s->core().m_bConnected &&
-                    (s->core().m_pSndBuffer->getCurrBufSize() < s->core().m_config.iSndBufSize))
+                // TO_REMOVE if (s->core().m_bConnected && (s->core().m_pSndBuffer->getCurrBufSize() < s->core().m_config.iSndBufSize))
+                if (s->core().m_State == CUDT::SSS_CONNECTED && (s->core().m_pSndBuffer->getCurrBufSize() < s->core().m_config.iSndBufSize))
                 {
                     writefds->push_back(s->id());
                     ++count;

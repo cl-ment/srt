@@ -638,6 +638,8 @@ public: // internal API
 
     bool stillConnected()
     {
+        return m_State == CUDT::SSS_CONNECTED;
+#ifdef TO_REMOVE
         // Still connected is when:
         // - no "broken" condition appeared (security, protocol error, response timeout)
         return !m_bBroken
@@ -645,6 +647,7 @@ public: // internal API
             && m_bConnected
             // - isn't currently closing (srt_close() called, response timeout, shutdown)
             && !m_bClosing;
+#endif 
     }
 
 private:
@@ -1051,8 +1054,8 @@ private:
 #if 0
     sync::atomic<bool> m_bListening;             // If the UDT entity is listening to connection
     sync::atomic<bool> m_bConnecting;            // The short phase when connect() is called but not yet completed
-#endif 
     sync::atomic<bool> m_bConnected;             // Whether the connection is on or off
+#endif 
     sync::atomic<bool> m_bClosing;               // If the UDT entity is closing
     sync::atomic<bool> m_bShutdown;              // If the peer side has shutdown the connection
     sync::atomic<bool> m_bBreaking;              // The flag that declares interrupt of the connecting process

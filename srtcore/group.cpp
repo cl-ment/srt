@@ -37,7 +37,8 @@ bool CUDTGroup::applyGroupSequences(SRTSOCKET target, int32_t& w_snd_isn, int32_
                 continue;
 
             CUDT& se = gi->ps->core();
-            if (!se.m_bConnected)
+            // TO_REMOVE if (!se.m_bConnected)
+            if (se.m_State != CUDT::SSS_CONNECTED)
                 continue;
 
             // Found it. Get the following sequences:
@@ -5103,7 +5104,8 @@ void CUDTGroup::updateLatestRcv(CUDTSocket* s)
         }
 
         // Sanity check
-        if (!gi->ps->core().m_bConnected)
+        // TO_REMOVE if (!gi->ps->core().m_bConnected)
+        if (gi->ps->core().m_State != CUDT::SSS_CONNECTED)
         {
             HLOGC(grlog.Debug, log << "grp: IPE: NOT updating rcv-seq on @" << gi->id << " - IDLE BUT NOT CONNECTED");
             continue;
