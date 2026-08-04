@@ -138,7 +138,8 @@ SRT_SOCKSTATUS CUDTSocket::getStatus()
         return SRTS_BROKEN;
 
     // Connecting timed out
-    if ((m_Status == SRTS_CONNECTING) && !m_UDT.m_bConnecting && !m_UDT.m_bConnected)
+    // TO_REMOVE if ((m_Status == SRTS_CONNECTING) && !m_UDT.m_bConnecting && !m_UDT.m_bConnected)
+    if ((m_Status == SRTS_CONNECTING) && !(m_UDT.m_State == CUDT::SSS_CONNECTING || m_UDT.m_State == CUDT::SSS_CONNECTED))
         return SRTS_BROKEN;
 
     return m_Status;
@@ -2578,7 +2579,8 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason)
     // has been set to a non-NULL value. The value itself can't be checked
     // as such because it causes a data race. All checked data here are atomic.
     SRT_SOCKSTATUS st = s->m_Status;
-    if (e.m_bConnecting && !e.m_bConnected && st >= SRTS_OPENED)
+    // TO_REMOVE if (e.m_bConnecting && !e.m_bConnected && st >= SRTS_OPENED)
+    if (e.m_State == CUDT::SSS_CLOSING && st >= SRTS_OPENED)
     {
         // Workaround for a design flaw.
         // It's to work around the case when the socket is being
@@ -2605,7 +2607,8 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason)
         // which will be then common with non-blocking mode, and synchronize
         // the blocking through a CV.
 
-        e.m_bClosing = true;
+        // TO REMIOVE e.m_bClosing = true;
+        e.m_State = CUDT::SSS_CLOSING;
 
         // XXX Kicking rcv q is no longer necessary. This was kicking the CV
         // that was sleeping on packet reception in CRcvQueue::m_mBuffer,

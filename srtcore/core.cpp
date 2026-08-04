@@ -391,8 +391,10 @@ void CUDT::construct()
     m_PeerID              = SRT_SOCKID_CONNREQ;
     m_State               = CUDT::SSS_INIT;
     m_bOpened             = false;
-    //m_bListening          = false;
+#ifdef TO_REMOVE
+    m_bListening          = false;
     m_bConnecting         = false;
+#endif
     m_bConnected          = false;
     m_bClosing            = false;
     m_bShutdown           = false;
@@ -1138,10 +1140,57 @@ void CUDT::setListenState()
 {
     if (!m_bOpened)
         throw CUDTException(MJ_NOTSUP, MN_NONE, 0);
-
+#ifdef TO_REMOVE
     if (m_bConnecting || m_bConnected)
         throw CUDTException(MJ_NOTSUP, MN_ISCONNECTED, 0);
+#endif
+    switch (m_State)
+    {
+        case CUDT::SSS_INIT:
+            for (;;)
+            {
+                if (m_State.compare_exchange(CUDT::SSS_INIT, CUDT::SSS_LISTENING))
+                {
+                    // if there is already another socket listening on the same port
+                    if (!m_pMuxer->setListener(this))
+                    {
+                        // Failed here, so 
+                        m_State = CUDT::SSS_INIT;
+                        throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
+                    }
+                }
+                else
+                {
+                    // Ok, this thread could have been blocked access,
+                    // but still the other thread that attempted to set
+                    // the listener could have failed. Therefore check
+                    // again if the listener was set successfully, and
+                    // if the listening point is still free, try again.
+                    CUDT* current = m_pMuxer->getListener();
+                    if (current == NULL)
+                    {
+                        continue;
+                    }
+                    else if (current != this)
+                    {
+                        // Some other listener already set it
+                        throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
+                    }
+                    // If it was you who set this, just return with no exception.
+                }
+                break;
+            }
+            break;
+        case CUDT::SSS_CONNECTING:
+            [[fallthrough]]
+        case CUDT::SSS_CONNECTED:
+            throw CUDTException(MJ_NOTSUP, MN_ISCONNECTED, 0);
+        default:
+            throw CUDTException(MJ_NOTSUP, MN_NONE, 0);
 
+    }
+
+#ifdef TO_REMOVE
     // listen can be called more than once
     // If two threads call srt_listen at the same time, only
     // one will pass this condition; others will be rejected.
@@ -1180,6 +1229,7 @@ void CUDT::setListenState()
         }
         break;
     }
+#endif
 }
 
 size_t CUDT::fillSrtHandshake(uint32_t *aw_srtdata, size_t srtlen, int msgtype, int hs_version)
@@ -1919,8 +1969,9 @@ bool CUDT::createSrtHandshake(
             LOGC(cnlog.Error,
                  log << CONID() << "createSrtHandshake: IPE: need to send KM, but CryptoControl does not exist."
                      << " Socket state: "
+                     << m_State << " "
                      << fmt_onoff(m_bConnected) << "connected, "
-                     << fmt_onoff(m_bConnecting) << "connecting, "
+// TO_REMOVE                     << fmt_onoff(m_bConnecting) << "connecting, "
                      << fmt_onoff(m_bBroken) << "broken, "
                      << fmt_onoff(m_bClosing) << "closing.");
             return false;
@@ -3837,7 +3888,8 @@ void CUDT::startConnect(const sockaddr_any& serv_addr, int32_t forced_isn)
      * Maybe m_ConnectionLock handling problem? Not used in CUDT::connect(const CPacket& response)
      */
     m_tsLastReqTime = tnow;
-    m_bConnecting = true;
+    // TO REMOVE m_bConnecting = true;
+    m_State = CUDT::SSS_CONNECTING;
 
     // At this point m_SourceAddr is probably default-any, but this function
     // now requires that the address be specified here because there will be
@@ -3919,7 +3971,8 @@ void CUDT::startConnect(const sockaddr_any& serv_addr, int32_t forced_isn)
         }
         catch (...)
         {
-            m_bConnecting = false;
+            // TO REMOVE m_bConnecting = false;
+            m_State = CUDT::SSS_INIT;
             m_pMuxer->removeConnector(m_SocketID);
             throw;
         }
@@ -4170,8 +4223,9 @@ EConnectStatus CUDT::craftKmResponse(uint32_t* aw_kmdata, size_t& w_kmdatasize)
             LOGC(cnlog.Error,
                  log << CONID() << "IPE: craftKmResponse needs to send KM, but CryptoControl does not exist."
                      << " Socket state: "
+                     << m_State << " "
                      << fmt_onoff(m_bConnected) << "connected, "
-                     << fmt_onoff(m_bConnecting) << "connecting, "
+                     // TO_REMOVE << fmt_onoff(m_bConnecting) << "connecting, "
                      << fmt_onoff(m_bBroken) << "broken, "
                      << fmt_onoff(m_bOpened) << "opened, "
                      << fmt_onoff(m_bClosing) << "closing.");
@@ -4624,7 +4678,8 @@ EConnectStatus CUDT::processConnectResponse(const CPacket& response, CUDTExcepti
     // - CONN_ACCEPT: the handshake is done and finished correctly
     // - CONN_CONTINUE: the induction handshake has been processed correctly, and expects CONCLUSION handshake
 
-    if (!m_bConnecting)
+    //if (!m_bConnecting)
+    if (m_State != CUDT::SSS_CONNECTING)
         return CONN_REJECT;
 
     // This is required in HSv5 rendezvous, in which it should send the URQ_AGREEMENT message to
@@ -5056,7 +5111,8 @@ EConnectStatus CUDT::postConnect(const CPacket* pResponse, bool rendezvous, CUDT
     }
 
     // And, I am connected too.
-    m_bConnecting = false;
+    // TO_REMOVE m_bConnecting = false;
+    m_State = CUDT::SSS_INIT;
 
     // The lock on m_ConnectionLock should still be applied, but
     // the socket could have been started removal before this function
@@ -6602,7 +6658,9 @@ bool CUDT::closeEntity(int reason) ATR_NOEXCEPT
     m_uPeerSrtVersion        = SRT_VERSION_UNK;
     m_tsRcvPeerStartTime     = steady_clock::time_point();
     m_bOpened = false;
+#ifdef TO_REMOVE
     m_bConnecting = false;
+#endif
     m_bConnected = false;
     HLOGC(smlog.Debug, log << CONID() << "closeEntity: done.");
 

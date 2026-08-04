@@ -1031,7 +1031,8 @@ void CRcvQueue::updateConnStatus(EReadStatus rst, EConnectStatus cst, const CPac
         // and may crash on next pass.
         //
         // TODO: maybe lock i->u->m_ConnectionLock?
-        i->u->m_bConnecting = false;
+        // TO_REMOVE i->u->m_bConnecting = false; 
+        // TODO I do not know what would be the m_State
 
         // DO NOT close the socket here because in this case it might be
         // unable to get status from at the right moment. Also only member

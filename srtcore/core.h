@@ -1050,8 +1050,8 @@ private:
     sync::atomic<enum SRTSocketState> m_State;
 #if 0
     sync::atomic<bool> m_bListening;             // If the UDT entity is listening to connection
-#endif 
     sync::atomic<bool> m_bConnecting;            // The short phase when connect() is called but not yet completed
+#endif 
     sync::atomic<bool> m_bConnected;             // Whether the connection is on or off
     sync::atomic<bool> m_bClosing;               // If the UDT entity is closing
     sync::atomic<bool> m_bShutdown;              // If the peer side has shutdown the connection
