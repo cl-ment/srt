@@ -234,7 +234,8 @@ public:
 
     void setBreaking()
     {
-        core().m_bBreaking = true;
+        // TO_REMOVE core().m_bBreaking = true;
+        core().m_State = CUDT::SSS_BREAKING;
         core().notifyBlockingConnect();
     }
 

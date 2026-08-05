@@ -396,10 +396,10 @@ void CUDT::construct()
     m_bConnecting         = false;
     m_bConnected          = false;
     m_bClosing            = false;
+    m_bBreaking           = false;
     m_bBroken             = false;
     m_bShutdown           = false;
 #endif
-    m_bBreaking           = false;
     m_bBreakAsUnstable    = false;
     // TODO: m_iBrokenCounter should be still set to some default.
     m_bPeerHealth         = true;
@@ -6828,13 +6828,16 @@ int CUDT::receiveBuffer(char *data, int len)
         switch(m_State)
         {
             case CUDT::SSS_SHUTDOWN:
-                if (!m_config.bMessageAPI)
                 {
-                    HLOGC(arlog.Debug, log << CONID() << "STREAM API, SHUTDOWN: marking as EOF");
-                    return 0;
+                    if (!m_config.bMessageAPI)
+                    {
+                        HLOGC(arlog.Debug, log << CONID() << "STREAM API, SHUTDOWN: marking as EOF");
+                        return 0;
+                    }
                 }
+                // fallthrough
             case CUDT::SSS_BROKEN:
-                // flallthrough
+                // fallthrough
             case CUDT::SSS_CLOSING:
                 HLOGC(arlog.Debug,
                         log << CONID() << (m_config.bMessageAPI ? "MESSAGE" : "STREAM") << " API, " << (m_bShutdown ? "" : "no")
