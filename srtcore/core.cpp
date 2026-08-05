@@ -397,8 +397,8 @@ void CUDT::construct()
     m_bConnected          = false;
     m_bClosing            = false;
     m_bBroken             = false;
-#endif
     m_bShutdown           = false;
+#endif
     m_bBreaking           = false;
     m_bBreakAsUnstable    = false;
     // TODO: m_iBrokenCounter should be still set to some default.
@@ -6616,27 +6616,31 @@ bool CUDT::closeEntity(int reason) ATR_NOEXCEPT
             m_pMuxer->removeConnector(m_SocketID);
             break;
         case CUDT::SSS_CONNECTED:
-            {
-                if (!m_bShutdown)
+                // TO_REMOVE if (!m_bShutdown)
                 {
                     HLOGC(smlog.Debug, log << CONID() << "CLOSING - sending SHUTDOWN to the peer @" << m_PeerID);
                     int32_t shdata[1] = { reason };
                     sendCtrl(UMSG_SHUTDOWN, NULL, shdata, sizeof shdata);
                 }
-
-                // Store current connection information.
-                CInfoBlock ib;
-                ib.m_iIPversion = m_PeerAddr.family();
-                CInfoBlock::convert(m_PeerAddr, ib.m_piIP);
-                ib.m_iSRTT      = m_iSRTT;
-                ib.m_iBandwidth = m_iBandwidth;
-                m_pCache->update(&ib);
+                // fall through 
+        case CUDT::SSS_SHUTDOWN:
+                // fallthrough
+        case CUDT::SSS_BROKEN:
+                {
+                    // Store current connection information.
+                    CInfoBlock ib;
+                    ib.m_iIPversion = m_PeerAddr.family();
+                    CInfoBlock::convert(m_PeerAddr, ib.m_piIP);
+                    ib.m_iSRTT      = m_iSRTT;
+                    ib.m_iBandwidth = m_iBandwidth;
+                    m_pCache->update(&ib);
 
 #if SRT_DEBUG_RTT
-                s_rtt_trace.trace(steady_clock::now(), "Cache", -1, -1,
-                        m_bIsFirstRTTReceived, -1, m_iSRTT, -1);
+                    s_rtt_trace.trace(steady_clock::now(), "Cache", -1, -1,
+                            m_bIsFirstRTTReceived, -1, m_iSRTT, -1);
 #endif
-            }
+
+                }
             break;
         default: 
             break;
@@ -6710,7 +6714,8 @@ bool CUDT::closeEntity(int reason) ATR_NOEXCEPT
 
 bool CUDT::closeAtFork() ATR_NOEXCEPT
 {
-    m_bShutdown = true;
+    // TO_REMOVE m_bShutdown = true;
+    // TODO find the right status for this case SSS_CLOSED ?
     return closeEntity(SRT_CLS_CLEANUP);
 }
 
@@ -6726,6 +6731,27 @@ int CUDT::receiveBuffer(char *data, int len)
     }
 
     UniqueLock recvguard(m_RecvLock);
+
+    if (!isRcvBufferReady())
+    {
+        switch(m_State)
+        {
+            case CUDT::SSS_SHUTDOWN:
+                HLOGC(arlog.Debug, log << CONID() << "STREAM API, SHUTDOWN: marking as EOF");
+                return 0;
+            case CUDT::SSS_BROKEN:
+                // fallthrough
+            case CUDT::SSS_CLOSING:
+                HLOGC(arlog.Debug,
+                        log << CONID() << (m_config.bMessageAPI ? "MESSAGE" : "STREAM") << " API, " << (m_bShutdown ? "" : "no")
+                        << " SHUTDOWN. Reporting as BROKEN.");
+                throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
+
+            default:
+                break;
+        }
+    }
+#ifdef TO_REMOVE
 
     // TO_REMOVE if ((m_bBroken || m_bClosing) && !isRcvBufferReady())
     if ((m_State == CUDT::SSS_BROKEN || m_State == CUDT::SSS_CLOSING) && !isRcvBufferReady())
@@ -6757,7 +6783,7 @@ int CUDT::receiveBuffer(char *data, int len)
                   << " SHUTDOWN. Reporting as BROKEN.");
         throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
     }
-
+#endif
     CSync rcond  (m_RecvDataCond, recvguard);
     CSync tscond (m_RcvTsbPdCond, recvguard);
     if (!isRcvBufferReady())
@@ -6797,6 +6823,29 @@ int CUDT::receiveBuffer(char *data, int len)
     if (m_State != CUDT::SSS_CONNECTED)
         throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
 
+    if (!isRcvBufferReady())
+    {
+        switch(m_State)
+        {
+            case CUDT::SSS_SHUTDOWN:
+                if (!m_config.bMessageAPI)
+                {
+                    HLOGC(arlog.Debug, log << CONID() << "STREAM API, SHUTDOWN: marking as EOF");
+                    return 0;
+                }
+            case CUDT::SSS_BROKEN:
+                // flallthrough
+            case CUDT::SSS_CLOSING:
+                HLOGC(arlog.Debug,
+                        log << CONID() << (m_config.bMessageAPI ? "MESSAGE" : "STREAM") << " API, " << (m_bShutdown ? "" : "no")
+                        << " SHUTDOWN. Reporting as BROKEN.");
+
+                throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
+            default:
+                break;
+        }
+    }
+#ifdef TO_REMOVE
     // TO_REMOVE if ((m_bBroken || m_bClosing) && !isRcvBufferReady())
     if ((m_State == CUDT::SSS_BROKEN || m_State == CUDT::SSS_CLOSING) && !isRcvBufferReady())
     {
@@ -6812,7 +6861,7 @@ int CUDT::receiveBuffer(char *data, int len)
 
         throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
     }
-
+#endif
     m_RcvBufferLock.lock();
     const int res = m_pRcvBuffer->readBuffer(data, len);
     m_RcvBufferLock.unlock();
@@ -7416,7 +7465,7 @@ int CUDT::receiveMessage(char* data, int len, SRT_MSGCTRL& w_mctrl, int by_excep
     // */
 
     //  TO_REMOVE if (m_bBroken || m_bClosing)
-    if (m_State == CUDT::SSS_BROKEN || m_State == CUDT::SSS_CLOSING || m_State == CUDT::SSS_CLOSED)
+    if (m_State != CUDT::SSS_CONNECTED)
     {
         HLOGC(arlog.Debug, log << CONID() << "receiveMessage: CONNECTION BROKEN - reading from recv buffer just for formality");
         m_RcvBufferLock.lock();
@@ -7444,7 +7493,7 @@ int CUDT::receiveMessage(char* data, int len, SRT_MSGCTRL& w_mctrl, int by_excep
 
         if (res == 0)
         {
-            if (!m_config.bMessageAPI && m_bShutdown)
+            if (!m_config.bMessageAPI && m_State == CUDT::SSS_SHUTDOWN)
                 return 0;
             // Forced to return error instead of throwing exception.
             if (!by_exception)
@@ -7613,10 +7662,19 @@ int CUDT::receiveMessage(char* data, int len, SRT_MSGCTRL& w_mctrl, int by_excep
                     // Forced to return 0 instead of throwing exception.
                     if (!by_exception)
                         return APIError(MJ_CONNECTION, MN_CONNLOST, 0).as<int>();
-                    if (!m_config.bMessageAPI && m_bShutdown)
+                    throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
+                    break;
+                }
+            case CUDT::SSS_SHUTDOWN:
+                {
+                    // Forced to return 0 instead of throwing exception.
+                    if (!by_exception)
+                        return APIError(MJ_CONNECTION, MN_CONNLOST, 0).as<int>();
+                    if (!m_config.bMessageAPI)
                         return 0;
                     throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
                     break;
+                
                 }
             default:
                 {
@@ -7838,18 +7896,20 @@ int64_t CUDT::recvfile(fstream &ofs, int64_t &offset, int64_t size, int block)
     {
         case CUDT::SSS_CONNECTED:
             break;
+        case CUDT::SSS_SHUTDOWN:
+            // Forced to return 0 instead of throwing exception.
+            if (!m_config.bMessageAPI)
+                return 0;
+            // fallthrough
         case CUDT::SSS_BROKEN:
             // fallthrough
         case CUDT::SSS_CLOSING:
             {
-                // Forced to return 0 instead of throwing exception.
-                if (!m_config.bMessageAPI && m_bShutdown)
-                    return 0;
                 throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
                 break;
             }
         default:
-                throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
+            throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
     }
     if (!m_CongCtl.ready())
         throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
@@ -7948,26 +8008,27 @@ int64_t CUDT::recvfile(fstream &ofs, int64_t &offset, int64_t size, int block)
         {
             case CUDT::SSS_CONNECTED:
                 break;
+            case CUDT::SSS_SHUTDOWN:
+                if (!m_config.bMessageAPI)
+                    return 0;
+                throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
             case CUDT::SSS_BROKEN:
                 // fallthrough
             case CUDT::SSS_CLOSING:
-                {
-                    // Forced to return 0 instead of throwing exception.
-                    if (!m_config.bMessageAPI && m_bShutdown)
-                        return 0;
-                    throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
-                    break;
-                }
+                // Forced to return 0 instead of throwing exception.
+                throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
+                break;
             default:
                 throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
         }
+
+#ifdef TO_REMOVE 
         if (!isRcvBufferReady())
         {
             if (!m_config.bMessageAPI && m_bShutdown)
                 return 0;
             throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
         }
-#ifdef TO_REMOVE 
         if (!m_bConnected)
             throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
         else if ((m_bBroken || m_bClosing) && !isRcvBufferReady())
@@ -9770,12 +9831,12 @@ void CUDT::processCtrlShutdown(const CPacket& ctrlpkt)
         setPeerCloseReason(SRT_CLS_FALLBACK);
     }
 
-    m_bShutdown = true;
 #ifdef TO_REMOVE 
+    m_bShutdown = true;
     m_bClosing = true;
     m_bBroken = true;
 #endif 
-    m_State = CUDT::SSS_BROKEN;
+    m_State = CUDT::SSS_SHUTDOWN;
     m_iBrokenCounter = 60;
 
     // This does the same as it would happen on connection timeout,
@@ -10706,8 +10767,8 @@ void CUDT::processClose()
     uint32_t res[1] = { SRT_CLS_OVERFLOW };
     sendCtrl(UMSG_SHUTDOWN, NULL, res, sizeof res);
 
-    m_bShutdown      = true;
 #ifdef TO_REMOVE 
+    m_bShutdown      = true;
     m_bClosing       = true;
     m_bBroken        = true;
 #endif 
