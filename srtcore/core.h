@@ -624,7 +624,8 @@ public: // internal API
     /// @brief  Request a socket to be broken due to too long instability (normally by a group).
     void breakAsUnstable()
     {
-        m_bBreakAsUnstable = true;
+        // TO_REMOVE m_bBreakAsUnstable = true;
+        m_State = CUDT::SSS_BREAK_AS_UNSTABLE;
         setAgentCloseReason(SRT_CLS_UNSTABLE);
     }
 
@@ -1061,8 +1062,8 @@ private:
     sync::atomic<bool> m_bBreaking;              // The flag that declares interrupt of the connecting process
     sync::atomic<bool> m_bBroken;                // If the connection has been broken
     sync::atomic<bool> m_bShutdown;              // If the peer side has shutdown the connection
-#endif 
     sync::atomic<bool> m_bBreakAsUnstable;       // A flag indicating that the socket should become broken because it has been unstable for too long.
+#endif 
     sync::atomic<bool> m_bPeerHealth;            // If the peer status is normal
     sync::atomic<bool> m_bManaged;               // The socket should be closed automatically if broken
     sync::atomic<bool> m_bOpened;                // If the UDT entity has been opened

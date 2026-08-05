@@ -398,9 +398,9 @@ void CUDT::construct()
     m_bClosing            = false;
     m_bBreaking           = false;
     m_bBroken             = false;
+    m_bBreakAsUnstable    = false;
     m_bShutdown           = false;
 #endif
-    m_bBreakAsUnstable    = false;
     // TODO: m_iBrokenCounter should be still set to some default.
     m_bPeerHealth         = true;
     m_RejectReason        = SRT_REJ_UNKNOWN;
@@ -12670,7 +12670,8 @@ bool CUDT::checkExpTimer(const steady_clock::time_point& currtime, int check_rea
         next_exp_time = m_tsLastRspTime.load() + exp_timeout;
     }
 
-    if (currtime <= next_exp_time && !m_bBreakAsUnstable)
+    // TO_REMOVE if (currtime <= next_exp_time && !m_bBreakAsUnstable)
+    if (currtime <= next_exp_time && m_State != CUDT::SSS_BREAK_AS_UNSTABLE)
         return false;
 
     // ms -> us
@@ -12678,7 +12679,8 @@ bool CUDT::checkExpTimer(const steady_clock::time_point& currtime, int check_rea
     // Haven't received any information from the peer, is it dead?!
     // timeout: at least 16 expirations and must be greater than 5 seconds
     time_point last_rsp_time = m_tsLastRspTime.load();
-    if (m_bBreakAsUnstable || ((m_iEXPCount > COMM_RESPONSE_MAX_EXP) &&
+    // TO_REMOVE if (m_bBreakAsUnstable || ((m_iEXPCount > COMM_RESPONSE_MAX_EXP) && (currtime - last_rsp_time > microseconds_from(PEER_IDLE_TMO_US))))
+    if (m_State == CUDT::SSS_BREAK_AS_UNSTABLE || ((m_iEXPCount > COMM_RESPONSE_MAX_EXP) &&
         (currtime - last_rsp_time > microseconds_from(PEER_IDLE_TMO_US))))
     {
         setAgentCloseReason(SRT_CLS_PEERIDLE);
