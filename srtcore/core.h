@@ -308,6 +308,7 @@ class CUDT
         SSS_PEER_HEALTH,
         SSS_MANAGED,
         SSS_OPENED,
+        SSS_CLOSED,
     };
 
     typedef sync::steady_clock::time_point time_point;
@@ -1055,11 +1056,11 @@ private:
     sync::atomic<bool> m_bListening;             // If the UDT entity is listening to connection
     sync::atomic<bool> m_bConnecting;            // The short phase when connect() is called but not yet completed
     sync::atomic<bool> m_bConnected;             // Whether the connection is on or off
+    sync::atomic<bool> m_bBroken;                // If the connection has been broken
 #endif 
     sync::atomic<bool> m_bClosing;               // If the UDT entity is closing
     sync::atomic<bool> m_bShutdown;              // If the peer side has shutdown the connection
     sync::atomic<bool> m_bBreaking;              // The flag that declares interrupt of the connecting process
-    sync::atomic<bool> m_bBroken;                // If the connection has been broken
     sync::atomic<bool> m_bBreakAsUnstable;       // A flag indicating that the socket should become broken because it has been unstable for too long.
     sync::atomic<bool> m_bPeerHealth;            // If the peer status is normal
     sync::atomic<bool> m_bManaged;               // The socket should be closed automatically if broken

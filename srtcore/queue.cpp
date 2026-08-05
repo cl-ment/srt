@@ -1650,7 +1650,8 @@ EReadStatus CRcvQueue::worker_RetrieveAndProcessUnit(EConnectStatus& w_cst, cons
 #endif
         }
 
-        if (u->m_bBroken || u->m_bClosing)
+        // TO_REMOVE if (u->m_bBroken || u->m_bClosing)
+        if (u->m_State == CUDT::SSS_BROKEN || u->m_State == CUDT::SSS_CLOSING || u->m_State == CUDT::SSS_CLOSED)
         {
             // If these flags are set, the socket is no longer eligible for any
             // updates, and they no longer are consistent as "former" group members.
