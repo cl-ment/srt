@@ -1458,7 +1458,7 @@ SRTSOCKET CUDTUnited::accept(const SRTSOCKET listen, sockaddr* pw_addr, int* pw_
         CSync      accept_sync(ls->m_AcceptCond, accept_lock);
 
         //if ((ls->m_Status != SRTS_LISTENING) || ls->core().m_bBroken)
-        if (ls->core().m_State == CUDT::SSS_LISTENING)
+        if (ls->core().m_State != CUDT::SSS_LISTENING)
         {
             // This socket has been closed.
             accepted = true;
