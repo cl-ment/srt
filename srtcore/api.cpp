@@ -3543,7 +3543,8 @@ void CUDTUnited::checkBrokenSockets()
             {
                 HLOGC(smlog.Debug, log << "checkBrokenSockets: marking CLOSED linger-expired @" << ps->id());
                 u.m_tsLingerExpiration = steady_clock::time_point();
-                u.m_bClosing           = true;
+                // TO_REMOVE u.m_bClosing           = true;
+                u.m_State = CUDT::SSS_BROKEN; // it looks like a BROKEN case instead of a CLOSING case
                 ps->m_tsClosureTimeStamp        = steady_clock::now();
             }
             else

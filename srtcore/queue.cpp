@@ -1773,7 +1773,8 @@ bool CRcvQueue::worker_TryAcceptedSocket(const CPacket& pkt, const sockaddr_any&
     keep.socket = s;
 
     CUDT* u = &s->core();
-    if (u->m_bBroken || u->m_bClosing)
+    // TO REMOVE if (u->m_bBroken || u->m_bClosing)
+    if (u->m_State != CUDT::SSS_BROKEN || u->m_State != CUDT::SSS_CLOSING || u->m_State != CUDT::SSS_CLOSED)
     {
         return false;
     }

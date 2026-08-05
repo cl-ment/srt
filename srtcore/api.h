@@ -226,7 +226,8 @@ public:
     // is no longer usable.
     void setClosing()
     {
-        core().m_bClosing = true;
+        // TO_REMOVE core().m_bClosing = true;
+        core().m_State = CUDT::SSS_CLOSING;
     }
 
     bool closeInternal(int reason) ATR_NOEXCEPT;

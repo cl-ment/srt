@@ -613,7 +613,8 @@ public: // internal API
     CSrtConfig m_config;
 
     SRTU_PROPERTY_RO(SRTSOCKET, id, m_SocketID);
-    SRTU_PROPERTY_RO(bool, isClosing, m_bClosing);
+    // TO_REMOVE SRTU_PROPERTY_RO(bool, isClosing, m_bClosing);
+    bool isClosing() { return m_State == SSS_CLOSING; }
     SRTU_PROPERTY_RO(CRcvBuffer*, rcvBuffer, m_pRcvBuffer);
     SRTU_PROPERTY_RO(bool, isTLPktDrop, m_bTLPktDrop);
     SRTU_PROPERTY_RO(bool, isSynReceiving, m_config.bSynRecving);
@@ -1052,13 +1053,13 @@ private:
 
     // Internal state
     sync::atomic<enum SRTSocketState> m_State;
-#if 0
+#ifdef TO_REMOVE
     sync::atomic<bool> m_bListening;             // If the UDT entity is listening to connection
     sync::atomic<bool> m_bConnecting;            // The short phase when connect() is called but not yet completed
     sync::atomic<bool> m_bConnected;             // Whether the connection is on or off
+    sync::atomic<bool> m_bClosing;               // If the UDT entity is closing
     sync::atomic<bool> m_bBroken;                // If the connection has been broken
 #endif 
-    sync::atomic<bool> m_bClosing;               // If the UDT entity is closing
     sync::atomic<bool> m_bShutdown;              // If the peer side has shutdown the connection
     sync::atomic<bool> m_bBreaking;              // The flag that declares interrupt of the connecting process
     sync::atomic<bool> m_bBreakAsUnstable;       // A flag indicating that the socket should become broken because it has been unstable for too long.

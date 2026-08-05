@@ -1831,7 +1831,8 @@ int CUDTGroup::sendMultilink(const char* buf, int len, SRT_MSGCTRL& w_mc, bool u
                 ?  &d->ps->core()
                 :  NULL;
 
-            if (!pu || pu->m_bBroken)
+            // TO_REMOVE if (!pu || pu->m_bBroken)
+            if (!pu || pu->m_State == CUDT::SSS_BROKEN)
             {
                 HLOGC(gslog.Debug,
                         log << "grp/sendMultilink: socket @" << d->id << " detected +Broken - transit to BROKEN");
@@ -3646,7 +3647,8 @@ void CUDTGroup::sendBackup_QualifyMemberStates(SendBackupCtx& w_sendBackupCtx, c
                 ?  &d->ps->core()
                 :  NULL;
 
-            if (!pu || pu->m_bBroken)
+            // TO_REMOVE if (!pu || pu->m_bBroken)
+            if (!pu || pu->m_State == CUDT::SSS_BROKEN)
             {
                 HLOGC(gslog.Debug, log << "grp/sendBackup: socket @" << d->id << " detected +Broken - transit to BROKEN");
                 d->sndstate = SRT_GST_BROKEN;
