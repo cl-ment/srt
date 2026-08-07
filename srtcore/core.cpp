@@ -3970,7 +3970,7 @@ void CUDT::startConnect(const sockaddr_any& serv_addr, int32_t forced_isn)
                     break;
                 case CUDT::SSS_CONNECTED:
                     HLOGC(cnlog.Debug, log << CONID() << "startConnect: SYNC MODE. CONNECTED detected - exit with success");
-                    break;
+                    goto end;
                 default: 
                     break;
 
@@ -4010,7 +4010,7 @@ void CUDT::startConnect(const sockaddr_any& serv_addr, int32_t forced_isn)
             throw;
         }
     }
-
+end:
     // Parameters at the end.
     HLOGC(cnlog.Debug,
           log << CONID() << "startConnect: success. Parameters: sourceIP=" << m_SourceAddr.str() << " mss=" << m_config.iMSS
@@ -5158,7 +5158,8 @@ EConnectStatus CUDT::postConnect(const CPacket* pResponse, bool rendezvous, CUDT
         // The socket could be closed at this very moment.
         // Continue with removing the socket from the pending structures,
         // but prevent it from setting it as connected.
-        // TO_REMOVE m_bConnected  = true; // /m_State is set below 
+        // TO_REMOVE m_bConnected  = true; 
+        s->core().m_State = CUDT::SSS_CONNECTED;
 
         HLOGC(cnlog.Debug, log << CONID() << "postConnect: setReceiver");
         // register this socket for receiving data packets
@@ -5237,6 +5238,7 @@ EConnectStatus CUDT::postConnect(const CPacket* pResponse, bool rendezvous, CUDT
 #endif
 
     s->m_Status = SRTS_CONNECTED;
+    s->core().m_State = CUDT::SSS_CONNECTED;
 
     // acknowledde any waiting epolls to write
     // This must be done AFTER the group member status is upgraded to IDLE because
@@ -6743,7 +6745,7 @@ int CUDT::receiveBuffer(char *data, int len)
                 // fallthrough
             case CUDT::SSS_CLOSING:
                 HLOGC(arlog.Debug,
-                        log << CONID() << (m_config.bMessageAPI ? "MESSAGE" : "STREAM") << " API, " << (m_bShutdown ? "" : "no")
+                        log << CONID() << (m_config.bMessageAPI ? "MESSAGE" : "STREAM") << " API, " // TO_REMOVE << (m_bShutdown ? "" : "no")
                         << " SHUTDOWN. Reporting as BROKEN.");
                 throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
 
@@ -6840,7 +6842,7 @@ int CUDT::receiveBuffer(char *data, int len)
                 // fallthrough
             case CUDT::SSS_CLOSING:
                 HLOGC(arlog.Debug,
-                        log << CONID() << (m_config.bMessageAPI ? "MESSAGE" : "STREAM") << " API, " << (m_bShutdown ? "" : "no")
+                        log << CONID() << (m_config.bMessageAPI ? "MESSAGE" : "STREAM") << " API, " // TO_REMOVE << (m_bShutdown ? "" : "no")
                         << " SHUTDOWN. Reporting as BROKEN.");
 
                 throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
@@ -13267,7 +13269,7 @@ void CUDT::copyCloseInfo(SRT_CLOSE_INFO& info)
 size_t CUDT::payloadSize() const
 {
     HLOGC(cnlog.Debug, log << "payloadSize Q: config/exp=" << m_config.zExpPayloadSize
-            << " max=" << m_iMaxSRTPayloadSize << " " << (m_bConnected? "+":"-") << "connected");
+            << " max=" << m_iMaxSRTPayloadSize << " "); // TO_REMOVE << (m_bConnected? "+":"-") << "connected");
     // If payloadsize is set, it should already be checked that
     // it is less than the possible maximum payload size. So return it
     // if it is set to nonzero value. In case when the connection isn't

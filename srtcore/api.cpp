@@ -1534,7 +1534,8 @@ SRTSOCKET CUDTUnited::accept(const SRTSOCKET listen, sockaddr* pw_addr, int* pw_
         throw CUDTException(MJ_SETUP, MN_CLOSED, 0);
     }
 
-    SRT_ASSERT(s->core().m_bConnected);
+    // TO_REMOVE SRT_ASSERT(s->core().m_bConnected);
+    SRT_ASSERT(s->core().m_State == CUDT::SSS_CONNECTED);
 
     // Set properly the SRTO_GROUPCONNECT flag (for general case; may be overridden later)
     s->core().m_config.iGroupConnect = 0;

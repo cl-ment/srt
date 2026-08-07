@@ -746,12 +746,14 @@ void CSndQueue::workerSendOrder()
 
             IF_HEAVY_LOGGING(const int id = u.socketID());
 
+#ifdef TO_REMOVE
 #define UST(field) ((u.m_b##field) ? "+" : "-") << #field << " "
             HLOGC(qslog.Debug,
                     log << "CSndQueue: requesting packet from @" << id << " STATUS: " << UST(Listening)
                     << UST(Connecting) << UST(Connected) << UST(Closing) << UST(Shutdown) << UST(Broken) << UST(PeerHealth)
                     << UST(Opened));
 #undef UST
+#endif
 
             // TO_REMOVE if (!u.m_bConnected || u.m_bBroken || u.m_bClosing)
             if (u.m_State != CUDT::SSS_CONNECTED)
@@ -1010,11 +1012,15 @@ void CRcvQueue::updateConnStatus(EReadStatus rst, EConnectStatus cst, const CPac
         {
             // cst == CONN_REJECT can only be result of worker_ProcessAddressedPacket and
             // its already set in this case.
-            LinkStatusInfo fi = *i;
-            fi.errorcode      = SRT_ECONNREJ;
-            toRemove.push_back(fi);
-            uint32_t res[1] = {SRT_CLS_DEADLSN};
-            i->u->sendCtrl(UMSG_SHUTDOWN, NULL, res, sizeof res);
+            if (i->id != dest_id)
+            {
+                LinkStatusInfo fi = *i;
+                fi.errorcode      = SRT_ECONNREJ;
+                toRemove.push_back(fi);
+                uint32_t res[1] = {SRT_CLS_DEADLSN};
+                i->u->sendCtrl(UMSG_SHUTDOWN, NULL, res, sizeof res);
+
+            } 
         }
     }
 
@@ -2314,7 +2320,7 @@ void CMultiplexer::rollUpdateSockets(const sync::steady_clock::time_point& curti
             CUDT* u = &point->m_pSocket->core();
 
             // TO_REMOVE if (u->m_bConnected && !u->m_bBroken && !u->m_bClosing)
-            if (u->m_State != CUDT::SSS_CONNECTED)
+            if (u->m_State == CUDT::SSS_CONNECTED)
             {
                 // Lock the sockets being collected here to prevent unexpected deletion
                 // SYMMETRY is ensured by adding them to this container.
