@@ -1485,10 +1485,12 @@ EReadStatus CRcvQueue::worker_DropIncomingPacket(sockaddr_any& w_addr)
     CPacket temp;
     temp.allocate(m_zPayloadSize);
     THREAD_PAUSED();
-    EReadStatus rst = m_pChannel->recvfrom((w_addr), (temp));
+    EReadStatus rst = m_pChannel->recvfrom((temp));
     THREAD_RESUMED();
     // Note: this will print nothing about the packet details unless heavy logging is on.
     LOGC(qrlog.Error, log << CONID() << "LOCAL STORAGE DEPLETED. Dropping 1 packet: " << temp.Info());
+    if (rst == RST_OK)
+        w_addr = temp.udpSourceAddr();
 
     // Be transparent for RST_ERROR, but ignore the correct
     // data read and fake that the packet was dropped.
@@ -1566,12 +1568,13 @@ EReadStatus CRcvQueue::worker_RetrieveAndProcessUnit(EConnectStatus& w_cst, cons
 
     // reading next incoming packet, recvfrom returns -1 is nothing has been received
     THREAD_PAUSED();
-    EReadStatus rst = m_pChannel->recvfrom((sa), (unit->m_Packet));
+    EReadStatus rst = m_pChannel->recvfrom((unit->m_Packet));
     THREAD_RESUMED();
 
     if (rst != RST_OK)
         return rst;
 
+    sa = unit->m_Packet.udpSourceAddr();
     w_id = unit->m_Packet.id();
     HLOGC(qrlog.Debug,
             log << "INCOMING PACKET: FROM=" << sa.str() << " BOUND=" << m_pChannel->bindAddressAny().str() << " "
@@ -1696,7 +1699,8 @@ EConnectStatus CRcvQueue::worker_ProcessConnectionRequest(CPacket& packet, const
         if (pListener)
         {
             LOGC(cnlog.Debug, log << "PASSING request from: " << addr.str() << " to listener:" << pListener->socketID());
-            listener_ret = pListener->processConnectRequest(addr, packet);
+            // TO_REMOVE listener_ret = pListener->processConnectRequest(addr, packet);
+            listener_ret = pListener->handlePacketListening(packet);
 
             // This function does return a code, but it's hard to say as to whether
             // anything can be done about it. In case when it's stated possible, the

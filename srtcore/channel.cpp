@@ -976,11 +976,12 @@ int CChannel::sendto(const sockaddr_any& addr, CPacket& packet, const CNetworkIn
     return res;
 }
 
-EReadStatus CChannel::recvfrom(sockaddr_any& w_addr, CPacket& w_packet) const
+EReadStatus CChannel::recvfrom(CPacket& w_packet) const
 {
     EReadStatus status    = RST_OK;
     int         msg_flags = 0;
     int         recv_size = -1;
+    sockaddr_any& w_addr = w_packet.m_SourceAddr; 
 
 #if defined(UNIX) || defined(_WIN32)
     fd_set  set;

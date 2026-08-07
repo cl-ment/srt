@@ -294,21 +294,21 @@ class CUDT
     friend class CUDTGroup;
     friend class TestMockCUDT; // unit tests
 
+
     enum SRTSocketState 
     {
-        SSS_INIT,
-        SSS_LISTENING,
-        SSS_CONNECTING,
-        SSS_CONNECTED,
-        SSS_CLOSING,
+        SSS_INIT,               // SRTS_INIT = 2,
+        SSS_OPENED,             // SRTS_OPENED,
+        SSS_LISTENING,          // SRTS_LISTENING,
+        SSS_CONNECTING,         // SRTS_CONNECTING,
+        SSS_CONNECTED,          // SRTS_CONNECTED,
+        SSS_CLOSING,            // SRTS_CLOSING,
         SSS_SHUTDOWN,
         SSS_BREAKING,
-        SSS_BROKEN,
+        SSS_BROKEN,             // SRTS_BROKEN,
         SSS_BREAK_AS_UNSTABLE,
-        SSS_PEER_HEALTH,
-        SSS_MANAGED,
-        SSS_OPENED,
-        SSS_CLOSED,
+        SSS_CLOSED,             // SRTS_CLOSED,
+        SSS_NONEXIST,           // SRTS_NONEXIST
     };
 
     typedef sync::steady_clock::time_point time_point;
@@ -659,6 +659,17 @@ private:
 
     /// Start listening to any connection request.
     void setListenState();
+
+    void buildHandshake(const sockaddr_any& serv_addr);
+    void buildHandshakeInduction(const sockaddr_any& serv_addr);
+    void buildHandshakeRendezVous(const sockaddr_any& serv_addr);
+    void sendHandshake(const sockaddr_any& serv_addr, const time_point tnow);
+    int handleHandshakeConclusionListening(CPacket &packet, CHandShake &hs);
+    int handleHandshakeInductionListening(CPacket &packet, CHandShake &hs);
+    int handleHandshakeListening(CPacket &packet);
+    int handlePacketListening(CPacket &packet);
+
+    void waitForConnection();
 
     /// Connect to a UDT entity listening at address "peer".
     /// @param peer [in] The address of the listening UDT entity.

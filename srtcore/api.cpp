@@ -146,15 +146,33 @@ SRT_SOCKSTATUS CUDTSocket::getStatus()
     // TODO Just map m_UDT.m_State to SRT_STOCKSTATUS
     switch(m_UDT.m_State)
     {
-        case CUDT::SSS_BROKEN:
-            return SRTS_BROKEN;
+
+        case CUDT::SSS_INIT: 
+            return SRTS_INIT;
+        case CUDT::SSS_OPENED:
+            return SRTS_OPENED;
+        case CUDT::SSS_LISTENING:
+            return SRTS_LISTENING;
         case CUDT::SSS_CONNECTING:
-            // fallthrough
+            return SRTS_CONNECTING;
         case CUDT::SSS_CONNECTED:
-            return m_Status;
-        default:
-            return  m_Status == SRTS_CONNECTING ? SRTS_BROKEN : m_Status;
+            return SRTS_CONNECTED;
+        case CUDT::SSS_CLOSING:
+            return SRTS_CLOSING;
+        case CUDT::SSS_SHUTDOWN:
+            // fallthrough
+        case CUDT::SSS_BREAKING:
+            // fallthrough
+        case CUDT::SSS_BREAK_AS_UNSTABLE:
+            // fallthrough
+        case CUDT::SSS_BROKEN:
+            return SRTS_CLOSING;
+        case CUDT::SSS_CLOSED:
+            return SRTS_CLOSED;
+        case CUDT::SSS_NONEXIST:           // SRTS_NONEXIST
+            return SRTS_NONEXIST;
     }
+    return SRTS_INIT;
 }
 
 // [[using locked(m_GlobControlLock)]]
@@ -178,6 +196,7 @@ void CUDTSocket::setClosed()
 {
     m_Status = SRTS_CLOSED;
 
+    m_UDT.m_State = CUDT::SSS_CLOSED;
     // a socket will not be immediately removed when it is closed
     // in order to prevent other methods from accessing invalid address
     // a timer is started and the socket will be removed after approximately
