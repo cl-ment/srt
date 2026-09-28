@@ -27,6 +27,7 @@ written by
 #if HVU_ENABLE_LOGGING
 #include "logger_fas.h"
 #endif
+#include "atomic.h"
 
 #include <haicrypt.h>
 #include <hcrypt_msg.h>
@@ -106,6 +107,35 @@ private:
 
     bool m_bErrorReported;
 
+    // Separation of the keys used in both directions of an HSv5 connection.
+    // Using the same SEK/salt in both directions would reuse the keystream,
+    // as the IV is derived from the packet sequence number only.
+    //
+    // - Both peers support it (SRT_OPT_SECDIST): the responder generates
+    //   its own TX key and returns its KM in the KMRSP (m_bIndependentKeys).
+    // - Otherwise: this side performs an immediate key refresh after connection
+    //   and does not send any data until the peer has acknowledged the new key.
+    enum ForcedRefreshState
+    {
+        FRS_NONE,    // Not needed.
+        FRS_NEEDED,  // Required, not started yet. Data sending is blocked.
+        FRS_PENDING, // New key sent, waiting for KMRSP. Data sending is blocked.
+        FRS_DONE,    // New key in use.
+        FRS_FAILED   // Could not be completed. The connection must be broken.
+    };
+    sync::atomic<int> m_iForcedRefresh; // ForcedRefreshState
+    int m_iForcedRefreshKi;
+    sync::steady_clock::time_point m_tsForcedRefreshStart;
+    bool m_bIndependentKeys;
+    bool m_bPeerSecDist; // The peer declared SRT_OPT_SECDIST in its HSREQ/HSRSP.
+    // Peer's own KM received in the handshake KMRSP, to recognize a repeated handshake.
+    unsigned char m_PeerKmMsg[HCRYPT_MSG_KM_MAX_SZ];
+    size_t m_PeerKmMsgLen;
+
+    SRT_TSA_NEEDS_NONLOCKED(m_mtxLock)
+    bool startForcedRefresh(CUDT* sock);
+    SRT_TSA_NEEDS_LOCKED(m_mtxLock)
+    void completeForcedRefresh(int ki);
 public:
     static void globalInit();
 
@@ -137,6 +167,29 @@ public:
     {
         return m_iCryptoMode;
     }
+
+    /// True if sending data must be held back until the peer has acknowledged
+    /// this side's own sending key (see ForcedRefreshState).
+    bool isSndDataGated() const
+    {
+        const int st = m_iForcedRefresh;
+        return st == FRS_NEEDED || st == FRS_PENDING || st == FRS_FAILED;
+    }
+
+    /// True if both directions use independently generated keys from the handshake.
+    bool hasIndependentKeys() const { return m_bIndependentKeys; }
+
+    /// Record whether the peer declared SRT_OPT_SECDIST in its HSREQ/HSRSP.
+    /// Must be set before the handshake KMREQ/KMRSP is processed.
+    void setPeerSecDist(bool yes) { m_bPeerSecDist = yes; }
+
+    /// Drive the forced key refresh (start it, keep retransmitting, check the deadline).
+    /// To be called periodically once the connection is established.
+    /// @param sock Socket used to send the KM request.
+    /// @param timeout Maximum time to wait for the peer to acknowledge the new key.
+    /// @return false if the refresh failed and the connection must be broken.
+    SRT_TSA_NEEDS_NONLOCKED(m_mtxLock)
+    bool checkForcedRefresh(CUDT* sock, const sync::steady_clock::duration& timeout);
 
     /// Regenerate cryptographic key material if needed.
     /// @param[in] sock If not null, the socket will be used to send the KM message to the peer (e.g. KM refresh).

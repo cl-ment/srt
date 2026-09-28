@@ -878,6 +878,10 @@ private:
 
     SRT_ATR_NODISCARD int sendmsg2(const char* data, int len, SRT_MSGCTRL& w_m);
 
+    /// Wait (or throw MJ_AGAIN if not blocking) until data may be encrypted
+    /// with this side's own TX key.
+    void waitSndKeyReady(bool blocking);
+
     SRT_ATR_NODISCARD int sendMessageInternal(const char* data, int len, void* selink, SRT_MSGCTRL& w_m);
 
     void updateCryptoOnSending();

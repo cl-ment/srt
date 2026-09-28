@@ -2241,7 +2241,17 @@ bool CUDT::processSrtMsg(const CPacket *ctrlpkt)
     case SRT_CMD_KMRSP:
     {
         // KMRSP doesn't expect any following action
+        const bool was_gated = m_CryptoControl.isSndDataGated();
         m_CryptoControl.processSrtMsg_KMRSP(srtdata, len, m_uPeerSrtVersion, false);
+
+        // Data may have been held in the sender buffer until now.
+        if (was_gated && !m_CryptoControl.isSndDataGated())
+        {
+            m_pMuxer->updateSendNormal(m_parent);
+            // Release the senders waiting in waitSndKeyReady().
+            CSync::lock_notify_all(m_SendBlockCond, m_SendBlockLock);
+            uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, SRT_EPOLL_OUT, true);
+        }
         return true; // nothing to do
     }
 
@@ -2810,6 +2820,9 @@ bool CUDT::interpretSrtHandshake(CUDTSocket* lsn SRT_ATR_UNUSED, const CHandShak
             // Still allow for connection, and allow Agent to send unencrypted stream to the peer.
             // Also normally allow the key to be processed; worst case it will send the failure response.
         }
+
+        // HSREQ/HSRSP has been processed above, so the peer's flags are known.
+        m_CryptoControl.setPeerSecDist(IsSet(m_uPeerSrtFlags, SRT_OPT_SECDIST));
 
         uint32_t *begin    = p;
         uint32_t *next     = 0;
@@ -6435,6 +6448,13 @@ void CUDT::checkSndTimers()
     // Retransmit KM request after a timeout if there is no response (KM RSP).
     // Or send KM REQ in case of the HSv4.
     m_CryptoControl.sendKeysToPeer(this, avgRTT());
+
+    if (m_bConnected && !m_bBroken && !m_CryptoControl.checkForcedRefresh(this, m_config.tdConnTimeOut))
+    {
+        // Sending data with the key shared with the peer's TX would reuse the keystream.
+        LOGC(cnlog.Error, log << CONID() << "checkSndTimers: independent TX key not established - breaking connection");
+        breakAsUnstable();
+    }
 }
 
 void CUDT::addressAndSend(CPacket& w_pkt)
@@ -6834,6 +6854,53 @@ int CUDT::sendmsg(const char *data, int len, int msttl, bool inorder, int64_t sr
     return this->sendmsg2(data, len, (mctrl));
 }
 
+// Until the peer has acknowledged our own TX key, encrypting data would reuse
+// the keystream of the peer's TX direction (see CCryptoControl::ForcedRefreshState).
+void CUDT::waitSndKeyReady(bool blocking)
+{
+    if (!m_CryptoControl.isSndDataGated())
+        return;
+
+    if (!blocking)
+    {
+        uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, SRT_EPOLL_OUT, false);
+        // Re-check: the key may have been acknowledged in the meantime.
+        if (m_CryptoControl.isSndDataGated())
+            throw CUDTException(MJ_AGAIN, MN_WRAVAIL, 0);
+        uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, SRT_EPOLL_OUT, true);
+        return;
+    }
+
+    HLOGC(aslog.Debug, log << CONID() << "sending: waiting for the peer to acknowledge the TX key");
+    {
+        CUniqueSync sendblock_cc (m_SendBlockLock, m_SendBlockCond);
+        const bool has_timeout = m_config.iSndTimeOut >= 0;
+        const steady_clock::time_point exptime = steady_clock::now() + milliseconds_from(m_config.iSndTimeOut);
+        THREAD_PAUSED();
+        while (stillConnected() && m_CryptoControl.isSndDataGated())
+        {
+            const steady_clock::time_point slice = steady_clock::now() + milliseconds_from(100);
+            if (has_timeout && slice >= exptime)
+            {
+                if (!sendblock_cc.wait_until(exptime))
+                    break;
+            }
+            else
+            {
+                sendblock_cc.wait_until(slice);
+            }
+        }
+        THREAD_RESUMED();
+    }
+
+    if (m_bBroken || m_bClosing)
+        throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
+    if (!m_bConnected)
+        throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
+    if (m_CryptoControl.isSndDataGated())
+        throw CUDTException(MJ_AGAIN, MN_XMTIMEOUT, 0);
+}
+
 // [[using maybe_locked(CUDTGroup::m_GroupLock, m_parent->m_GroupOf != NULL)]]
 // GroupLock is applied when this function is called from inside CUDTGroup::send,
 // which is the only case when the m_parent->m_GroupOf is not NULL.
@@ -6915,6 +6982,9 @@ int CUDT::sendmsg2(const char *data, int len, SRT_MSGCTRL& w_mctrl)
     }
 
     UniqueLock sendguard(m_SendLock);
+
+    // The sender buffer encrypts the data when it is added.
+    waitSndKeyReady(m_config.bSynSending);
 
     if (m_pSndBuffer->getCurrBufSize() == 0)
     {
@@ -7538,6 +7608,9 @@ int64_t CUDT::sendfile(fstream &ifs, int64_t &offset, int64_t size, int block)
     }
 
     ScopedLock sendguard (m_SendLock);
+
+    // The sender buffer encrypts the data when it is added.
+    waitSndKeyReady(true);
 
     if (m_pSndBuffer->getCurrBufSize() == 0)
     {
@@ -10409,6 +10482,14 @@ bool CUDT::packUniqueData(CSndPacket& w_sndpkt)
     int current_sequence_number; // reflexing variable
     time_point tsOrigin;
     int pld_size;
+
+    // Until the peer has acknowledged our own TX key, sending data would reuse
+    // the keystream of the peer's TX direction (see CCryptoControl::ForcedRefreshState).
+    if (m_CryptoControl.isSndDataGated())
+    {
+        HLOGC(qslog.Debug, log << CONID() << "packUniqueData: waiting for the peer to acknowledge the TX key");
+        return false;
+    }
 
     {
         ScopedLock lkrack (m_RecvAckLock);
