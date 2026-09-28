@@ -2246,12 +2246,7 @@ bool CUDT::processSrtMsg(const CPacket *ctrlpkt)
 
         // Data may have been held in the sender buffer until now.
         if (was_gated && !m_CryptoControl.isSndDataGated())
-        {
             m_pMuxer->updateSendNormal(m_parent);
-            // Release the senders waiting in waitSndKeyReady().
-            CSync::lock_notify_all(m_SendBlockCond, m_SendBlockLock);
-            uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, SRT_EPOLL_OUT, true);
-        }
         return true; // nothing to do
     }
 
@@ -6854,53 +6849,6 @@ int CUDT::sendmsg(const char *data, int len, int msttl, bool inorder, int64_t sr
     return this->sendmsg2(data, len, (mctrl));
 }
 
-// Until the peer has acknowledged our own TX key, encrypting data would reuse
-// the keystream of the peer's TX direction (see CCryptoControl::ForcedRefreshState).
-void CUDT::waitSndKeyReady(bool blocking)
-{
-    if (!m_CryptoControl.isSndDataGated())
-        return;
-
-    if (!blocking)
-    {
-        uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, SRT_EPOLL_OUT, false);
-        // Re-check: the key may have been acknowledged in the meantime.
-        if (m_CryptoControl.isSndDataGated())
-            throw CUDTException(MJ_AGAIN, MN_WRAVAIL, 0);
-        uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, SRT_EPOLL_OUT, true);
-        return;
-    }
-
-    HLOGC(aslog.Debug, log << CONID() << "sending: waiting for the peer to acknowledge the TX key");
-    {
-        CUniqueSync sendblock_cc (m_SendBlockLock, m_SendBlockCond);
-        const bool has_timeout = m_config.iSndTimeOut >= 0;
-        const steady_clock::time_point exptime = steady_clock::now() + milliseconds_from(m_config.iSndTimeOut);
-        THREAD_PAUSED();
-        while (stillConnected() && m_CryptoControl.isSndDataGated())
-        {
-            const steady_clock::time_point slice = steady_clock::now() + milliseconds_from(100);
-            if (has_timeout && slice >= exptime)
-            {
-                if (!sendblock_cc.wait_until(exptime))
-                    break;
-            }
-            else
-            {
-                sendblock_cc.wait_until(slice);
-            }
-        }
-        THREAD_RESUMED();
-    }
-
-    if (m_bBroken || m_bClosing)
-        throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
-    if (!m_bConnected)
-        throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
-    if (m_CryptoControl.isSndDataGated())
-        throw CUDTException(MJ_AGAIN, MN_XMTIMEOUT, 0);
-}
-
 // [[using maybe_locked(CUDTGroup::m_GroupLock, m_parent->m_GroupOf != NULL)]]
 // GroupLock is applied when this function is called from inside CUDTGroup::send,
 // which is the only case when the m_parent->m_GroupOf is not NULL.
@@ -6982,9 +6930,6 @@ int CUDT::sendmsg2(const char *data, int len, SRT_MSGCTRL& w_mctrl)
     }
 
     UniqueLock sendguard(m_SendLock);
-
-    // The sender buffer encrypts the data when it is added.
-    waitSndKeyReady(m_config.bSynSending);
 
     if (m_pSndBuffer->getCurrBufSize() == 0)
     {
@@ -7608,9 +7553,6 @@ int64_t CUDT::sendfile(fstream &ifs, int64_t &offset, int64_t size, int block)
     }
 
     ScopedLock sendguard (m_SendLock);
-
-    // The sender buffer encrypts the data when it is added.
-    waitSndKeyReady(true);
 
     if (m_pSndBuffer->getCurrBufSize() == 0)
     {
@@ -10506,7 +10448,7 @@ bool CUDT::packUniqueData(CSndPacket& w_sndpkt)
 
         current_sequence_number = m_iSndCurrSeqNo; // PROXY for atomic; ALSO needed later.
         time_point next_unique_ts;
-        pld_size = m_pSndBuffer->extractUniquePacket((w_sndpkt), (tsOrigin), (current_sequence_number), (next_unique_ts));
+        pld_size = m_pSndBuffer->extractUniquePacket((w_sndpkt), (tsOrigin), (current_sequence_number), (next_unique_ts), &m_CryptoControl);
         IF_HEAVY_LOGGING(int32_t prev = m_iSndCurrSeqNo);
 
         m_iSndCurrSeqNo = current_sequence_number;

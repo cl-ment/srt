@@ -126,6 +126,7 @@ struct SndPktArray
         int m_iLossLength;
         int m_iNextLossGroupOffset;
         int m_iBusy;
+        bool m_bEncryptPending; //< Stored in clear; to be encrypted when extracted for sending.
 
         bool updated_rexmit_time_passed(const time_point& now, const duration& miniv)
         {
@@ -393,7 +394,10 @@ public:
     SRT_TSA_NEEDS_NONLOCKED(m_BufLock)
     EncryptionKeySpec addBufferFromFile(std::fstream& ifs, int len, CCryptoControl& crypto, int64_t& w_consumed);
 
+    /// Encrypt the packet, or mark it to be encrypted at extraction if the crypto
+    /// control does not allow encrypting data yet (see CCryptoControl::isSndDataGated()).
     EncryptionKeySpec checkEncryption(SndPktArray::Packet& p, CCryptoControl& crypto);
+    EncryptionKeySpec encryptPacket(SndPktArray::Packet& p, CCryptoControl& crypto);
 
     // Special values that can be returned by extractUniquePacket.
     static const int READ_NONE = 0;
@@ -405,9 +409,11 @@ public:
     /// @param [out] w_origintime Scheduling time of the packet
     /// @param [inout] w_lastseqno Sequence number of last unique packet; updated in the call
     /// @param [out] w_nextuniquets Set to the time of the packet next to extracted unique or zero time if no such packet
+    /// @param [in] crypto Crypto control to encrypt a packet stored in clear (m_bEncryptPending)
     /// @return Actual length of data read.
     SRT_TSA_NEEDS_NONLOCKED(m_BufLock)
-    int extractUniquePacket(CSndPacket& w_packet, time_point& w_origintime, int32_t& w_lastseqno, time_point& w_nextuniquets);
+    int extractUniquePacket(CSndPacket& w_packet, time_point& w_origintime, int32_t& w_lastseqno, time_point& w_nextuniquets,
+            CCryptoControl* crypto = NULL);
 
     struct DropRange
     {

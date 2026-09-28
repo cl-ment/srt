@@ -244,6 +244,24 @@ EncryptionKeySpec CSndBuffer::checkEncryption(SndPktArray::Packet& w_p, CCryptoC
     if (f == EK_NOENC || f == EK_ERROR)
         return f; // need no encryption || invalid settings
 
+    // The sending key is not yet separated from the peer's one: keep the payload
+    // in clear, it will be encrypted when extracted for sending (not before the key
+    // has been acknowledged by the peer).
+    if (w_crypto.isSndDataGated())
+    {
+        w_p.m_bEncryptPending = true;
+        return f;
+    }
+
+    return encryptPacket(w_p, w_crypto);
+}
+
+EncryptionKeySpec CSndBuffer::encryptPacket(SndPktArray::Packet& w_p, CCryptoControl& w_crypto)
+{
+    EncryptionKeySpec f = w_crypto.getSndCryptoFlags();
+    if (f == EK_NOENC || f == EK_ERROR)
+        return f; // need no encryption || invalid settings
+
     int32_t fake_header[SRT_PH_E_SIZE] = {w_p.m_iSeqNo, w_p.m_iMsgNoBitset, 0, 0};
     if (w_crypto.encrypt(fake_header, (w_p.m_pcData), (w_p.m_iLength)) != ENCS_CLEAR)
     {
@@ -251,10 +269,12 @@ EncryptionKeySpec CSndBuffer::checkEncryption(SndPktArray::Packet& w_p, CCryptoC
     }
 
     w_p.m_iMsgNoBitset |= MSGNO_ENCKEYSPEC::wrap(f);
+    w_p.m_bEncryptPending = false;
     return f;
 }
 
-int CSndBuffer::extractUniquePacket(CSndPacket& w_packet, time_point& w_srctime, int32_t& w_lastseqno, time_point& w_nextuniquets)
+int CSndBuffer::extractUniquePacket(CSndPacket& w_packet, time_point& w_srctime, int32_t& w_lastseqno, time_point& w_nextuniquets,
+        CCryptoControl* w_crypto)
 {
     ScopedLock bufferguard(m_BufLock);
 
@@ -306,6 +326,19 @@ int CSndBuffer::extractUniquePacket(CSndPacket& w_packet, time_point& w_srctime,
             // Just in case, but unique packets should have this field always 0.
             p->m_tsNextRexmitTime = time_point();
             continue;
+        }
+
+        if (p->m_bEncryptPending)
+        {
+            // Never send it in clear, nor encrypted with a key that the peer
+            // is still using for its own sending direction.
+            if (!w_crypto || w_crypto->isSndDataGated() || encryptPacket(*p, *w_crypto) == EK_ERROR)
+            {
+                LOGC(bslog.Error, log << CONID() << "CSndBuffer: packet %" << p->m_iSeqNo
+                        << " can't be encrypted yet - not sending");
+                w_lastseqno = CSeqNo::decseq(p->m_iSeqNo);
+                return READ_NONE;
+            }
         }
 
         // IMPORTANT: we rewrite w_packet.pkt from p, but p IS NOT w_packet.pkt.
@@ -1035,6 +1068,7 @@ SndPktArray::Packet& SndPktArray::push()
 
     // Allocate the packet payload space
     that.m_iBusy = 0;
+    that.m_bEncryptPending = false;
     that.m_iLength = m_Storage.blocksize;
     that.m_pcData = m_Storage.get();
 
