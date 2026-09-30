@@ -637,6 +637,7 @@ public: // internal API
     {
         // TO REMOVE m_bListening = false;
         m_pMuxer->removeListener(this);
+        m_pMuxer->removeDefaultSocket(this);
         return m_pMuxer->id();
     }
 

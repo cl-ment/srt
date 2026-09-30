@@ -555,6 +555,43 @@ TEST_F(ReuseAddr, SameAddrV6)
 }
 
 
+// Several SRT sockets may share the multiplexer bound to a given IP:PORT,
+// but only one of them can be the default socket, i.e. the one receiving
+// the packets addressed to socket ID 0 (listener or rendezvous socket).
+TEST_F(ReuseAddr, DefaultSocketConflict)
+{
+    SRTSOCKET lsn = createListener("127.0.0.1", 5000, true);
+    ASSERT_NE(lsn, SRT_INVALID_SOCK);
+
+    // A second listener on the same IP:PORT is rejected.
+    SRTSOCKET lsn2 = createBinder("127.0.0.1", 5000, true);
+    ASSERT_NE(lsn2, SRT_INVALID_SOCK);
+    EXPECT_EQ(srt_listen(lsn2, SOMAXCONN), SRT_ERROR);
+    EXPECT_EQ(srt_getlasterror(NULL), SRT_EDUPLISTEN);
+    srt_close(lsn2);
+
+    // A rendezvous socket on the same IP:PORT is rejected.
+    SRTSOCKET rdv = createBinder("127.0.0.1", 5000, true);
+    ASSERT_NE(rdv, SRT_INVALID_SOCK);
+    int yes = 1;
+    ASSERT_NE(srt_setsockflag(rdv, SRTO_RENDEZVOUS, &yes, sizeof yes), SRT_ERROR);
+    sockaddr_any peer = srt::CreateAddr("127.0.0.1", 5001, AF_INET);
+    EXPECT_EQ(srt_connect(rdv, peer.get(), peer.size()), SRT_ERROR);
+    EXPECT_EQ(srt_getlasterror(NULL), SRT_EBINDCONFLICT);
+    srt_close(rdv);
+
+    // A caller sharing the listener's multiplexer is still fine.
+    testAccept(lsn, "127.0.0.1", 5000, true);
+
+    // Once the listener is closed, the default socket is free again.
+    ASSERT_NE(srt_close(lsn), SRT_ERROR);
+    SRTSOCKET lsn3 = createListener("127.0.0.1", 5000, true);
+    ASSERT_NE(lsn3, SRT_INVALID_SOCK);
+    testAccept(lsn3, "127.0.0.1", 5000, true);
+
+    shutdownListener(lsn3);
+}
+
 TEST_F(ReuseAddr, DiffAddr)
 {
     std::string localip = GetLocalIP(AF_INET);

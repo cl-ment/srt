@@ -1862,6 +1862,23 @@ bool CRcvQueue::removeListener(CUDT* u)
     return rem;
 }
 
+bool CRcvQueue::setDefaultSocket(CUDT* u)
+{
+    // Claiming it again by the same socket is not an error.
+    return m_pDefaultSocket.compare_exchange(NULL, u) || getDefaultSocket() == u;
+}
+
+CUDT* CRcvQueue::getDefaultSocket()
+{
+    SharedLock lkd (m_pDefaultSocket);
+    return m_pDefaultSocket.get_locked(lkd);
+}
+
+bool CRcvQueue::removeDefaultSocket(CUDT* u)
+{
+    return m_pDefaultSocket.compare_exchange(u, NULL);
+}
+
 void CMultiplexer::registerCRL(const CRL& setup)
 {
     ScopedLock vg(m_SocketsLock);

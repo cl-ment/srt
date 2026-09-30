@@ -840,6 +840,9 @@ private:
     bool setListener(CUDT* u);
     CUDT* getListener();
     bool removeListener(CUDT* u);
+    bool setDefaultSocket(CUDT* u);
+    CUDT* getDefaultSocket();
+    bool removeDefaultSocket(CUDT* u);
     void storePktClone(SRTSOCKET id, const CPacket& pkt);
     void kick();
 
@@ -852,6 +855,12 @@ private:
 
 private:
     sync::CSharedObjectPtr<CUDT> m_pListener;        // pointer to the (unique, if any) listening UDT entity
+
+    // The socket that receives the packets addressed to socket ID 0 on this
+    // multiplexer (listener or rendezvous socket). It is unique: several SRT
+    // sockets may share the multiplexer (SRTO_REUSEADDR), but only one of them
+    // can be the default socket.
+    sync::CSharedObjectPtr<CUDT> m_pDefaultSocket;
 
     void registerConnector(const SRTSOCKET&                      id,
                            CUDT*                                 u,
@@ -1084,6 +1093,9 @@ public:
     bool removeListener(CUDT* u) { return m_RcvQueue.removeListener(u); }
     int setListener(CUDT* u) { return m_RcvQueue.setListener(u); }
     CUDT* getListener() { return m_RcvQueue.getListener(); }
+    bool setDefaultSocket(CUDT* u) { return m_RcvQueue.setDefaultSocket(u); }
+    CUDT* getDefaultSocket() { return m_RcvQueue.getDefaultSocket(); }
+    bool removeDefaultSocket(CUDT* u) { return m_RcvQueue.removeDefaultSocket(u); }
 
     void configure(int32_t id, const CSrtConfig& config, const sockaddr_any& reqaddr, const SYSSOCKET* udpsock);
 

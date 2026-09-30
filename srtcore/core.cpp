@@ -1196,10 +1196,19 @@ void CUDT::setListenState()
             {
                 if (m_State.compare_exchange(CUDT::SSS_OPENED, CUDT::SSS_LISTENING))
                 {
+                    // The listener receives the packets addressed to socket ID 0,
+                    // so it must be the default socket of the multiplexer.
+                    if (!m_pMuxer->setDefaultSocket(this))
+                    {
+                        setState(CUDT::SSS_OPENED);
+                        throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
+                    }
+
                     // if there is already another socket listening on the same port
                     if (!m_pMuxer->setListener(this))
                     {
                         // Failed here, so 
+                        m_pMuxer->removeDefaultSocket(this);
                         setState(CUDT::SSS_OPENED);
                         throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
                     }
@@ -4088,6 +4097,15 @@ void CUDT::startConnect(const sockaddr_any& serv_addr, int32_t forced_isn)
         default: 
             break;
     }
+    // The rendezvous socket receives the handshakes addressed to socket ID 0,
+    // so it must be the default socket of the multiplexer.
+    if (m_config.bRendezvous && !m_pMuxer->setDefaultSocket(this))
+    {
+        LOGC(cnlog.Error, log << CONID() << "startConnect: another socket (listener or rendezvous) already uses "
+                << m_pMuxer->selfAddr().str());
+        throw CUDTException(MJ_NOTSUP, MN_BUSYPORT, 0);
+    }
+
     m_PeerAddr = serv_addr;
     // register this socket in the rendezvous queue
     // RendezevousQueue is used to temporarily store incoming handshake, non-rendezvous connections also require this
@@ -5914,6 +5932,10 @@ bool srt::CUDT::closeEntity(int reason) ATR_NOEXCEPT
     {
         return false;
     }
+
+    // Release the default socket slot (listener or rendezvous), if occupied.
+    if (m_pMuxer)
+        m_pMuxer->removeDefaultSocket(this);
 
     if (!closeBasic(reason))
         return false;

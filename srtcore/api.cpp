@@ -3725,6 +3725,7 @@ CMultiplexer* CUDTUnited::tryUnbindClosedSocket(const SRTSOCKET u)
 
     // Unpin this socket from the multiplexer.
     s->m_iMuxID = -1;
+    mux->removeDefaultSocket(&s->core());
     mux->deleteSocket(u);
 
     // XXX HERE PURGE THE SENDER AND RECEIVER BUFFERS !!!
@@ -3851,6 +3852,7 @@ CMultiplexer* CUDTUnited::tryRemoveClosedSocket(const SRTSOCKET u)
         {
             // Unpin this socket from the multiplexer.
             s->m_iMuxID = -1;
+            mux->removeDefaultSocket(&s->core());
             mux->deleteSocket(u);
             HLOGC(smlog.Debug, log << CONID(u) << "deleted from MUXER and cleared muxer ID");
         }
