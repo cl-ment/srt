@@ -18,8 +18,18 @@ namespace srt {
     public:
         CUDT* core;
 
-        bool processCtrl(const CPacket& pkt) { return core->processCtrl(pkt); }
-        void processCtrlLossReport(const CPacket& pkt) { core->processCtrlLossReport(pkt); }
+        bool processCtrl(const CPacket& pkt)
+        {
+            CUDT::CtrlHandler h = &CUDT::processCtrlUnknown;
+            switch (pkt.getType())
+            {
+            case UMSG_DROPREQ: h = &CUDT::processCtrlDropReq; break;
+            case UMSG_LOSSREPORT: h = &CUDT::processCtrlLossReport; break;
+            default: break;
+            }
+            return core->processCtrl(pkt, h);
+        }
+        void processCtrlLossReport(const CPacket& pkt) { core->processCtrlLossReport(pkt, sync::steady_clock::now()); }
         int32_t rcvCurrSeqNo() const { return core->m_iRcvCurrSeqNo; }
         void setRcvCurrSeqNo(int32_t v) { core->m_iRcvCurrSeqNo = v; }
         bool isBroken() const { return core->m_State == CUDT::SSS_BROKEN; }

@@ -8729,7 +8729,7 @@ bool CUDT::processCtrlAckAck(const CPacket& ctrlpkt, const time_point& tsArrival
     return true;
 }
 
-bool CUDT::processCtrlLossReport(const CPacket& ctrlpkt)
+bool CUDT::processCtrlLossReport(const CPacket& ctrlpkt, const time_point&)
 {
     const int32_t* losslist = (int32_t*)(ctrlpkt.m_pcData);
     const size_t   losslist_len = ctrlpkt.getLength() / sizeof(int32_t);
@@ -8942,7 +8942,7 @@ bool CUDT::processCtrlLossReport(const CPacket& ctrlpkt)
 //   ID 0), handled by the listener or worker_TryAcceptedSocket(),
 // - rendezvous: the peer gets connected upon reception of any DATA or
 //   KEEPALIVE packet (see handlePeerConnectedRendezvous()).
-bool CUDT::processCtrlHS(const CPacket& ctrlpkt)
+bool CUDT::processCtrlHS(const CPacket& ctrlpkt, const time_point&)
 {
     CHandShake req;
     if (-1 == req.load_from(ctrlpkt.m_pcData, ctrlpkt.getLength()))
@@ -8986,7 +8986,7 @@ bool CUDT::processCtrlHSRejection(const CHandShake& req)
     return processCtrlShutdown(int(SRT_CLS_LATE));
 }
 
-bool CUDT::processCtrlDropReq(const CPacket& ctrlpkt)
+bool CUDT::processCtrlDropReq(const CPacket& ctrlpkt, const time_point&)
 {
     // dropdata[0..1] are indexed unconditionally below.
     typedef int32_t expected_t[2];
@@ -9125,7 +9125,7 @@ bool CUDT::processCtrlDropReq(const CPacket& ctrlpkt)
     return true;
 }
 
-bool CUDT::processCtrlShutdown(const CPacket& ctrlpkt)
+bool CUDT::processCtrlShutdown(const CPacket& ctrlpkt, const time_point&)
 {
     const uint32_t* data = (const uint32_t*) ctrlpkt.m_pcData;
     const size_t   data_len = ctrlpkt.getLength() / 4;
@@ -9171,7 +9171,7 @@ bool CUDT::processCtrlShutdown(int reason)
     return true;
 }
 
-bool CUDT::processCtrlUserDefined(const CPacket& ctrlpkt)
+bool CUDT::processCtrlUserDefined(const CPacket& ctrlpkt, const time_point&)
 {
     HLOGC(inlog.Debug, log << CONID() << "CONTROL EXT MSG RECEIVED:"
         << MessageTypeStr(ctrlpkt.getType(), ctrlpkt.getExtendedType())
@@ -9202,7 +9202,35 @@ bool CUDT::processCtrlUserDefined(const CPacket& ctrlpkt)
     return true;
 }
 
-bool CUDT::processCtrl(const CPacket &ctrlpkt)
+bool CUDT::processCtrlCgWarning(const CPacket&, const time_point&)
+{
+    // One way packet delay is increasing, so decrease the sending rate
+    m_tdSendInterval = (m_tdSendInterval.load() * 1125) / 1000;
+    // XXX Note as interesting fact: this is only prepared for handling,
+    // but nothing in the code is sending this message. Probably predicted
+    // for a custom congctl. There's a predicted place to call it under
+    // UMSG_ACKACK handling, but it's commented out.
+    return false;
+}
+
+bool CUDT::processCtrlPeerError(const CPacket&, const time_point&)
+{
+    // int err_type = packet.getAddInfo();
+
+    // currently only this error is signalled from the peer side
+    // if recvfile() fails (e.g., due to disk fail), blocked sendfile/send should return immediately
+    // giving the app a chance to fix the issue
+    m_bPeerHealth = false;
+    return true;
+}
+
+bool CUDT::processCtrlUnknown(const CPacket& ctrlpkt SRT_ATR_UNUSED, const time_point&)
+{
+    HLOGC(inlog.Debug, log << CONID() << "incoming UMSG: unknown type " << ctrlpkt.getType() << " - IGNORED");
+    return false;
+}
+
+bool CUDT::processCtrl(const CPacket &ctrlpkt, CtrlHandler handler)
 {
     // Just heard from the peer, reset the expiration count.
     m_iEXPCount = 1;
@@ -9227,66 +9255,7 @@ bool CUDT::processCtrl(const CPacket &ctrlpkt)
               << " arg=" << ctrlpkt.getAckSeqNo() << "/0x" << fmt(ctrlpkt.getAckSeqNo(), hex));
 
     // XXX [TSA] This function may need to lock m_ConnectionLock
-    bool result = false;
-    switch (ctrlpkt.getType())
-    {
-    case UMSG_ACK: // 010 - Acknowledgement
-        result = processCtrlAck(ctrlpkt, currtime);
-        break;
-
-    case UMSG_ACKACK: // 110 - Acknowledgement of Acknowledgement
-        result = processCtrlAckAck(ctrlpkt, currtime);
-        break;
-
-    case UMSG_LOSSREPORT: // 011 - Loss Report
-        result = processCtrlLossReport(ctrlpkt);
-        break;
-
-    case UMSG_CGWARNING: // 100 - Delay Warning
-        // One way packet delay is increasing, so decrease the sending rate
-        m_tdSendInterval = (m_tdSendInterval.load() * 1125) / 1000;
-        // XXX Note as interesting fact: this is only prepared for handling,
-        // but nothing in the code is sending this message. Probably predicted
-        // for a custom congctl. There's a predicted place to call it under
-        // UMSG_ACKACK handling, but it's commented out.
-
-        break;
-
-    case UMSG_KEEPALIVE: // 001 - Keep-alive
-        result = processKeepalive(ctrlpkt, currtime);
-        break;
-
-    case UMSG_HANDSHAKE: // 000 - Handshake
-        result = processCtrlHS(ctrlpkt);
-        break;
-
-    case UMSG_SHUTDOWN: // 101 - Shutdown
-        result = processCtrlShutdown(ctrlpkt);
-        break;
-
-    case UMSG_DROPREQ: // 111 - Msg drop request
-        result = processCtrlDropReq(ctrlpkt);
-        break;
-
-    case UMSG_PEERERROR: // 1000 - An error has happened to the peer side
-        // int err_type = packet.getAddInfo();
-
-        // currently only this error is signalled from the peer side
-        // if recvfile() fails (e.g., due to disk fail), blocked sendfile/send should return immediately
-        // giving the app a chance to fix the issue
-        m_bPeerHealth = false;
-        result = true;
-
-        break;
-
-    case UMSG_EXT: // 0x7FFF - reserved and user defined messages
-        result = processCtrlUserDefined(ctrlpkt);
-        break;
-
-    default:
-        break;
-    }
-    return result;
+    return (this->*handler)(ctrlpkt, currtime);
 }
 
 // Called only for the old buffer with groups (XXX so might be it's not necessary)
@@ -11845,21 +11814,6 @@ int CUDT::handleHandshakeListening(CPacket &packet)
 
 }
 
-int CUDT::handlePacketListening(CPacket &packet)
-{
-    switch(packet.getType())
-    {
-        case UMSG_HANDSHAKE:
-            return handleHandshakeListening(packet);
-        default:
-            m_RejectReason = SRT_REJ_ROGUE;
-            LOGC(cnlog.Error,
-                    log << CONID() << __FUNCTION__ << ": the packet received as handshake is not a handshake message");
-            return m_RejectReason;
-
-    }
-}
-
 // [[using locked(m_ConnectionLock)]]
 bool CUDT::loadResponseHandshake(const CPacket& packet, CHandShake& w_hs)
 {
@@ -11965,7 +11919,7 @@ EConnectStatus CUDT::handleHandshakeConclusionCaller(const CPacket& packet, cons
 }
 
 // [[using locked(m_ConnectionLock)]]
-EConnectStatus CUDT::handleHandshakeCaller(const CPacket& packet, CUDTException* eout) ATR_NOEXCEPT
+EConnectStatus CUDT::handleHandshakeCaller(const CPacket& packet)
 {
     CHandShake hs;
     if (!loadResponseHandshake(packet, (hs)))
@@ -11976,7 +11930,7 @@ EConnectStatus CUDT::handleHandshakeCaller(const CPacket& packet, CUDTException*
     case SSS_CALLER_INDUCTION:
         return handleHandshakeInductionCaller(hs);
     case SSS_CALLER_CONCLUSION:
-        return handleHandshakeConclusionCaller(packet, hs, eout);
+        return handleHandshakeConclusionCaller(packet, hs, NULL);
     default:
         LOGC(cnlog.Error, log << CONID() << __FUNCTION__ << ": IPE: unexpected state " << int(m_State));
         m_RejectReason = SRT_REJ_IPE;
@@ -11984,11 +11938,29 @@ EConnectStatus CUDT::handleHandshakeCaller(const CPacket& packet, CUDTException*
     }
 }
 
-EConnectStatus CUDT::handlePacketCaller(const CPacket& packet) ATR_NOEXCEPT
+// UMSG_SHUTDOWN while connecting: the listener refuses the connection.
+// [[using locked(m_ConnectionLock)]]
+EConnectStatus CUDT::handleShutdownCaller(const CPacket&)
 {
-    CUDTException e;
-    EConnectStatus cst = CONN_REJECT;
+    m_RejectReason = SRT_REJ_ROGUE;
+    LOGC(cnlog.Error, log << CONID() << __FUNCTION__ << ": UMSG_SHUTDOWN received, rejecting connection.");
+    return CONN_REJECT;
+}
 
+// Any other packet (data or control) while a handshake is expected: the
+// handshake request will be resent.
+// [[using locked(m_ConnectionLock)]]
+EConnectStatus CUDT::handleUnexpectedCaller(const CPacket& packet)
+{
+    m_RejectReason = SRT_REJ_ROGUE;
+    LOGC(cnlog.Warn,
+         log << CONID() << __FUNCTION__ << ": CONFUSED: expected UMSG_HANDSHAKE, got: "
+             << (packet.isControl() ? MessageTypeStr(packet.getType(), packet.getExtendedType()) : string("DATA")));
+    return CONN_CONFUSED;
+}
+
+EConnectStatus CUDT::processCallerPacket(const CPacket& packet, ConnectingHandler handler) ATR_NOEXCEPT
+{
     ScopedLock cg(m_ConnectionLock);
 
     HLOGC(cnlog.Debug,
@@ -12001,35 +11973,7 @@ EConnectStatus CUDT::handlePacketCaller(const CPacket& packet) ATR_NOEXCEPT
         return CONN_REJECT;
     }
 
-    if (!packet.isControl())
-    {
-        m_RejectReason = SRT_REJ_ROGUE;
-        LOGC(cnlog.Warn, log << CONID() << __FUNCTION__ << ": received DATA while HANDSHAKE expected");
-        cst = CONN_CONFUSED;
-    }
-    else
-    {
-        switch (packet.getType())
-        {
-        case UMSG_HANDSHAKE:
-            cst = handleHandshakeCaller(packet, &e);
-            break;
-
-        case UMSG_SHUTDOWN:
-            m_RejectReason = SRT_REJ_ROGUE;
-            LOGC(cnlog.Error, log << CONID() << __FUNCTION__ << ": UMSG_SHUTDOWN received, rejecting connection.");
-            cst = CONN_REJECT;
-            break;
-
-        default:
-            m_RejectReason = SRT_REJ_ROGUE;
-            LOGC(cnlog.Error,
-                 log << CONID() << __FUNCTION__ << ": CONFUSED: expected UMSG_HANDSHAKE, got: "
-                     << MessageTypeStr(packet.getType(), packet.getExtendedType()));
-            cst = CONN_CONFUSED;
-            break;
-        }
-    }
+    const EConnectStatus cst = (this->*handler)(packet);
 
     HLOGC(cnlog.Debug,
           log << CONID() << __FUNCTION__ << ": result: " << ConnectStatusStr(cst)
@@ -12041,8 +11985,8 @@ EConnectStatus CUDT::handlePacketCaller(const CPacket& packet) ATR_NOEXCEPT
 
 // Rendezvous (HSv5) side of the handshake state machine.
 //
-// The entry point is handlePacketRendezvous(), called from the receiver worker
-// for packets addressed to a PENDING rendezvous socket. The handshake packets
+// The entry point is processRendezvousPacket(), called from the receiver worker
+// for packets addressed to a connecting rendezvous socket. The handshake packets
 // are dispatched according to the current SSS_RDV_* state to the per-state
 // handlers, which decide the state transition and the response (request type
 // and extension). The response is then sent directly by the handler, so that
@@ -12553,10 +12497,24 @@ EConnectStatus CUDT::handlePeerConnectedRendezvous(const CPacket& packet)
     return postConnect(&packet, hsv5, NULL);
 }
 
-EConnectStatus CUDT::handlePacketRendezvous(const CPacket& packet) ATR_NOEXCEPT
+// Any other control packet: in rendezvous mode both sides are known to the
+// service operator (unlike a listener), so the connection process is terminated.
+// [[using locked(m_ConnectionLock)]]
+EConnectStatus CUDT::handleUnexpectedRendezvous(const CPacket& packet)
 {
-    EConnectStatus cst = CONN_REJECT;
+    m_RejectReason = SRT_REJ_ROGUE;
+    LOGC(cnlog.Error,
+         log << CONID() << __FUNCTION__ << ": "
+             << (packet.getType() == UMSG_SHUTDOWN
+                     ? string("UMSG_SHUTDOWN received")
+                     : "CONFUSED: expected UMSG_HANDSHAKE, got: "
+                           + string(MessageTypeStr(packet.getType(), packet.getExtendedType())))
+             << ", rejecting connection.");
+    return CONN_REJECT;
+}
 
+EConnectStatus CUDT::processRendezvousPacket(const CPacket& packet, ConnectingHandler handler) ATR_NOEXCEPT
+{
     ScopedLock cg(m_ConnectionLock);
 
     HLOGC(cnlog.Debug,
@@ -12570,28 +12528,7 @@ EConnectStatus CUDT::handlePacketRendezvous(const CPacket& packet) ATR_NOEXCEPT
         return CONN_REJECT;
     }
 
-    if (!packet.isControl() || packet.getType() == UMSG_KEEPALIVE || packet.getType() == UMSG_EXT)
-    {
-        cst = handlePeerConnectedRendezvous(packet);
-    }
-    else if (packet.getType() == UMSG_HANDSHAKE)
-    {
-        cst = handleHandshakeRendezvous(packet);
-    }
-    else
-    {
-        // In rendezvous mode both sides are known to the service operator
-        // (unlike a listener), so the connection process is terminated.
-        m_RejectReason = SRT_REJ_ROGUE;
-        LOGC(cnlog.Error,
-             log << CONID() << __FUNCTION__ << ": "
-                 << (packet.getType() == UMSG_SHUTDOWN
-                         ? string("UMSG_SHUTDOWN received")
-                         : "CONFUSED: expected UMSG_HANDSHAKE, got: "
-                               + string(MessageTypeStr(packet.getType(), packet.getExtendedType())))
-                 << ", rejecting connection.");
-        cst = CONN_REJECT;
-    }
+    const EConnectStatus cst = (this->*handler)(packet);
 
     HLOGC(cnlog.Debug,
           log << CONID() << __FUNCTION__ << ": result: " << ConnectStatusStr(cst) << " state: " << stateStr(m_State));

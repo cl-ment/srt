@@ -87,6 +87,13 @@ namespace srt
 class CChannel;
 class CUDT;
 
+// Packet handlers of CUDT, selected by the receiver worker according to the
+// packet type and the socket state (see CRcvQueue::worker_HandlePacket).
+// - control packet received by a connected socket:
+typedef bool (CUDT::*CUDTCtrlHandler)(const CPacket& ctrlpkt, const sync::steady_clock::time_point& currtime);
+// - packet received by a connecting (caller or rendezvous) socket:
+typedef EConnectStatus (CUDT::*CUDTConnectingHandler)(const CPacket& packet);
+
 #if !USE_RECEIVER_UNIT_POOL
 class CUnitQueue;
 
@@ -800,15 +807,17 @@ private:
     // Handlers per packet type, dispatching on the target socket state
     EConnectStatus worker_HandleData(CUDT& u, RcvUnit& unit, const CPacket*& w_pkt);
     EConnectStatus worker_HandleHandshake(CUDT& u, CPacket& packet, const sockaddr_any& addr);
-    EConnectStatus worker_HandleControl(CUDT& u, CPacket& packet);
+    EConnectStatus worker_HandleShutdown(CUDT& u, CPacket& packet);
+    EConnectStatus worker_HandleKeepalive(CUDT& u, CPacket& packet, CUDTCtrlHandler handler);
+    EConnectStatus worker_HandleSessionCtrl(CUDT& u, CPacket& packet, CUDTCtrlHandler handler);
     // Processing per socket state
     EConnectStatus worker_PassToListener(CUDT& u, CPacket& packet, const sockaddr_any& addr);
-    EConnectStatus worker_PassToCaller(CUDT& u, const CPacket& packet);
-    EConnectStatus worker_PassToRendezvous(CUDT& u, const CPacket& packet);
-    void worker_PassCtrlToConnected(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_PassToCaller(CUDT& u, const CPacket& packet, CUDTConnectingHandler handler);
+    EConnectStatus worker_PassToRendezvous(CUDT& u, const CPacket& packet, CUDTConnectingHandler handler);
+    void worker_PassCtrlToConnected(CUDT& u, const CPacket& packet, CUDTCtrlHandler handler);
     void worker_PassDataToConnected(CUDT& u, RcvUnit& unit, const CPacket*& w_pkt);
     void worker_PostDispatch(CUDT& u);
-    EConnectStatus worker_RejectDisconnected(CUDT& u);
+    EConnectStatus worker_HandleNotConnected(CUDT& u, const CPacket& packet);
     EConnectStatus worker_ProcessAddressedPacket(SRTSOCKET id, CUnit* unit, const sockaddr_any& sa);
     bool worker_TryAcceptedSocket(const CPacket& packet, const sockaddr_any& addr);
 
