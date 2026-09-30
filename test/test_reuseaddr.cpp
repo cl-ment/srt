@@ -592,6 +592,51 @@ TEST_F(ReuseAddr, DefaultSocketConflict)
     shutdownListener(lsn3);
 }
 
+// A rendezvous socket is the default socket of its binding only while it is
+// connecting: once connected, the binding can be used by a listener or another
+// rendezvous socket.
+TEST_F(ReuseAddr, RendezvousReleasesDefaultSocket)
+{
+    auto createRendezvous = [this](int port) {
+        SRTSOCKET s = createBinder("127.0.0.1", port, true);
+        int yes = 1;
+        EXPECT_NE(srt_setsockflag(s, SRTO_RENDEZVOUS, &yes, sizeof yes), SRT_ERROR);
+        EXPECT_NE(srt_setsockflag(s, SRTO_RCVSYN, &yes, sizeof yes), SRT_ERROR);
+        return s;
+    };
+
+    auto connectPair = [](SRTSOCKET a, int port_a, SRTSOCKET b, int port_b) {
+        sockaddr_any sa = srt::CreateAddr("127.0.0.1", port_a, AF_INET);
+        sockaddr_any sb = srt::CreateAddr("127.0.0.1", port_b, AF_INET);
+        std::future<int> fa = std::async(std::launch::async, [&]() { return srt_connect(a, sb.get(), sb.size()); });
+        EXPECT_NE(srt_connect(b, sa.get(), sa.size()), SRT_ERROR);
+        EXPECT_NE(fa.get(), SRT_ERROR);
+    };
+
+    SRTSOCKET a = createRendezvous(5000);
+    SRTSOCKET b = createRendezvous(5001);
+    connectPair(a, 5000, b, 5001);
+
+    // Another rendezvous socket on the binding of a (connected).
+    SRTSOCKET c = createRendezvous(5000);
+    SRTSOCKET d = createRendezvous(5002);
+    connectPair(c, 5000, d, 5002);
+
+    // And a listener as well.
+    SRTSOCKET lsn = createListener("127.0.0.1", 5000, true);
+    ASSERT_NE(lsn, SRT_INVALID_SOCK);
+    testAccept(lsn, "127.0.0.1", 5000, true);
+
+    EXPECT_EQ(srt_getsockstate(a), SRTS_CONNECTED);
+    EXPECT_EQ(srt_getsockstate(c), SRTS_CONNECTED);
+
+    srt_close(a);
+    srt_close(b);
+    srt_close(c);
+    srt_close(d);
+    shutdownListener(lsn);
+}
+
 TEST_F(ReuseAddr, DiffAddr)
 {
     std::string localip = GetLocalIP(AF_INET);

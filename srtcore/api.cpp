@@ -3376,6 +3376,26 @@ bool CUDTUnited::acquireSocket(CUDTSocket* s)
     return true;
 }
 
+// Acquires the default socket of the multiplexer (see acquireSocket), or
+// returns NULL if there is none.
+CUDTSocket* CUDTUnited::acquireDefaultSocket(CMultiplexer& mux)
+{
+    // Lock order: m_GlobControlLock, then the default socket slot. The GC
+    // releases the slot before deleting the socket, under m_GlobControlLock,
+    // so the socket can't be deleted before being acquired.
+    SharedLock cg(m_GlobControlLock);
+    CUDT* u = mux.getDefaultSocket();
+    if (!u)
+        return NULL;
+
+    CUDTSocket* s = u->m_parent;
+    if (s->core().m_State >= CUDT::SSS_CLOSED)
+        return NULL;
+
+    s->apiAcquire();
+    return s;
+}
+
 void CUDTUnited::releaseSocket(CUDTSocket* s)
 {
     SRT_ASSERT(s && s->isStillBusy() > 0);

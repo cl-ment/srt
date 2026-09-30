@@ -798,6 +798,7 @@ private:
     void worker_ProcessUnit(RcvUnit& unit, EConnectStatus& w_cst, const CPacket*& w_pkt, SRTSOCKET& w_id);
     EConnectStatus worker_ProcessConnectionRequest(CPacket& packet, const sockaddr_any& sa);
     EConnectStatus worker_RetryOrRendezvous(CUDT* u, const CPacket& packet);
+    EConnectStatus worker_ProcessRendezvousRequest(const CPacket& packet, const sockaddr_any& addr);
     EConnectStatus worker_ProcessAddressedPacket(SRTSOCKET id, CUnit* unit, const sockaddr_any& sa);
     bool worker_TryAcceptedSocket(const CPacket& packet, const sockaddr_any& addr);
 
@@ -1022,7 +1023,6 @@ public:
     /// @param addr source address of the packet received over UDP (peer address).
     /// @param id socket ID.
     /// @return a pointer to CUDT instance retrieved, or NULL if nothing was found.
-    CUDT* retrieveRID(const sockaddr_any& addr, SRTSOCKET id) const;
 
     void resetExpiredRID(const std::vector<LinkStatusInfo>& toRemove);
     void registerCRL(const CRL& setup);

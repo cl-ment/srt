@@ -566,6 +566,7 @@ public:
 
     CUDTSocket* locateAcquireSocket(SRTSOCKET u, ErrorHandling erh = ERH_RETURN);
     bool acquireSocket(CUDTSocket* s);
+    CUDTSocket* acquireDefaultSocket(CMultiplexer& mux);
     void releaseSocket(CUDTSocket* s);
 
 private:

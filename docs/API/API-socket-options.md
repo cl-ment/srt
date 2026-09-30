@@ -1610,9 +1610,9 @@ currently destined. This has some similarities to the `SO_REUSEADDR` system sock
 option, although it's only used inside SRT.
 
 Among the SRT sockets sharing a binding, only one can be a listener or a
-rendezvous socket (the "default socket" of the binding, which receives the
-packets not yet addressed to a particular socket). Any number of caller
-sockets can share it. See [`srt_bind`](API-functions.md#srt_bind).
+connecting rendezvous socket (the "default socket" of the binding, which
+receives the packets not yet addressed to a particular socket). Any number of
+caller sockets and connected rendezvous sockets can share it. See [`srt_bind`](API-functions.md#srt_bind).
 
 *TODO: This option weirdly only allows the socket used in **bind()** to use the
 local address that another socket is already using, but not to disallow another

@@ -494,14 +494,15 @@ Among the SRT sockets sharing a binding, only one can receive the packets
 that are not yet addressed to a particular socket (connection requests and
 rendezvous handshakes). This socket is called the "default socket" of the
 binding and it is either a listener ([`srt_listen`](#srt_listen)) or a
-rendezvous socket ([`srt_connect`](#srt_connect) with
+connecting rendezvous socket ([`srt_connect`](#srt_connect) with
 [`SRTO_RENDEZVOUS`](API-socket-options.md#SRTO_RENDEZVOUS) set). Hence a
-shared binding can have at most one listener or one rendezvous socket, but
-not both, whereas any number of caller sockets can share it. Trying to make
+shared binding can have at most one listener or one connecting rendezvous
+socket, but not both, whereas any number of caller sockets (and connected
+rendezvous sockets) can share it. Trying to make
 a second socket the default one fails with `SRT_EDUPLISTEN`
 ([`srt_listen`](#srt_listen)) or `SRT_EBINDCONFLICT`
 ([`srt_connect`](#srt_connect) in rendezvous mode). The default socket is
-released when it is closed.
+released when it is closed, or, for a rendezvous socket, once it is connected.
 
 **NOTE**: This function cannot be called on a socket group. If you need to
 have the group-member socket bound to the specified source address before
@@ -1044,7 +1045,7 @@ the case of failure, `SRT_INVALID_SOCK` is returned.
 |:------------------------------------- |:----------------------------------------------------------- |
 | [`SRT_EINVSOCK`](#srt_einvsock)       | Socket [`u`](#u) indicates no valid socket or group ID      |
 | [`SRT_ERDVUNBOUND`](#srt_erdvunbound) | Socket [`u`](#u) is in rendezvous mode, but it wasn't bound (see note #2) |
-| [`SRT_EBINDCONFLICT`](#srt_ebindconflict) | Socket [`u`](#u) is in rendezvous mode, but its binding is already used by a listener or another rendezvous socket |
+| [`SRT_EBINDCONFLICT`](#srt_ebindconflict) | Socket [`u`](#u) is in rendezvous mode, but its binding is already used by a listener or another connecting rendezvous socket |
 | [`SRT_ECONNSOCK`](#srt_econnsock)     | Socket [`u`](#u) is already connected                       |
 | [`SRT_ECONNREJ`](#srt_econnrej)       | Connection has been rejected                                |
 | [`SRT_ENOSERVER`](#srt_enoserver)     | Connection has been timed out (see [`SRTO_CONNTIMEO`](API-socket-options.md#SRTO_CONNTIMEO)) |
@@ -3638,7 +3639,7 @@ or the congestion controller has failed to check call parameters.
 The port tried to be bound for listening is already busy. Note that binding to the same port
 is allowed in general (when [`SRTO_REUSEADDR`](API-socket-options.md#SRTO_REUSEADDRS)
 is true on every socket that has bound it), but only one such socket can be a listener,
-and it can't be a listener if a rendezvous socket already uses this binding
+and it can't be a listener if a connecting rendezvous socket already uses this binding
 (see [`srt_bind`](#srt_bind), "default socket").
 
 
@@ -3734,8 +3735,8 @@ If any of these conditions isn't satisfied, the `srt_bind` function results
 in conflict and report this error.
 
 This error is also reported by [`srt_connect`](#srt_connect) in rendezvous mode
-when the binding of the socket is shared with a listener or another rendezvous
-socket: only one of them can be the "default socket" of the binding (see
+when the binding of the socket is shared with a listener or another connecting
+rendezvous socket: only one of them can be the "default socket" of the binding (see
 [`srt_bind`](#srt_bind)).
 
 #### SRT_EASYNCFAIL

@@ -4774,6 +4774,10 @@ EConnectStatus CUDT::postConnect(const CPacket* pResponse, bool rendezvous, CUDT
         HLOGC(cnlog.Debug, log << CONID() << "postConnect: setReceiver");
         // register this socket for receiving data packets
         m_pMuxer->setReceiver(this);
+
+        // A connected rendezvous socket receives the packets addressed to its
+        // ID only, so it no longer needs to be the default socket.
+        releaseDefaultSocket();
     }
 
     // XXX Problem around CONN_CONFUSED!

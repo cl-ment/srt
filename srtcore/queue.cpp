@@ -883,63 +883,6 @@ void SocketHolder::setConnectedState()
     }
 }
 
-CUDT* CMultiplexer::retrieveRID(const sockaddr_any& addr, SRTSOCKET id) const
-{
-    ScopedLock vg(m_SocketsLock);
-
-    IF_HEAVY_LOGGING(const char* const id_type = id == SRT_SOCKID_CONNREQ ? "A NEW CONNECTION" : "THIS ID" );
-
-    // TODO: optimize search
-    for (list<CRL>::const_iterator i = m_lRendezvousID.begin(); i != m_lRendezvousID.end(); ++i)
-    {
-        if (i->m_PeerAddr == addr && ((id == SRT_SOCKID_CONNREQ) || (id == i->m_iID)))
-        {
-            // This procedure doesn't exactly respond to the original UDT idea.
-            // As the "rendezvous queue" is used for handling rendezvous and
-            // the caller sockets, the RID list should give up a socket entity
-            // in the following cases:
-            // 1. For THE SAME id as passed in w_id, respond always, as per a caller
-            //    socket that is currently trying to connect and is managed with
-            //    HS roundtrips in an event-style. Same for rendezvous.
-            // 2. For the "connection request" ID=0 the found socket should be given up
-            //    ONLY IF it is rendezvous. Normally ID=0 is only for listener as a
-            //    connection request. But if there was a listener, then this function
-            //    wouldn't even be called, as this case would be handled before trying
-            //    to call this function.
-            //
-            // This means: if an incoming ID is 0, then this search should succeed ONLY
-            // IF THE FOUND SOCKET WAS RENDEZVOUS.
-
-            if (id == SRT_SOCKID_CONNREQ && !i->m_pUDT->m_config.bRendezvous)
-            {
-                HLOGC(cnlog.Debug,
-                        log << "RID: found id @" << i->m_iID << " while looking for "
-                        << id_type << " FROM " << i->m_PeerAddr.str()
-                        << ", but it's NOT RENDEZVOUS, skipping");
-                continue;
-            }
-
-            HLOGC(cnlog.Debug,
-                    log << "RID: found id @" << i->m_iID << " while looking for "
-                    << id_type << " FROM " << i->m_PeerAddr.str());
-            return i->m_pUDT;
-        }
-    }
-
-#if HVU_ENABLE_HEAVY_LOGGING
-    std::ostringstream spec;
-    if (id == SRT_SOCKID_CONNREQ)
-        spec << "A NEW CONNECTION REQUEST";
-    else
-        spec << " AGENT @" << id;
-    HLOGC(cnlog.Debug,
-          log << "RID: NO CONNECTOR FOR ADR:" << addr.str() << " while looking for " << spec.str() << " ("
-              << m_lRendezvousID.size() << " connectors total)");
-#endif
-
-    return NULL;
-}
-
 void CRcvQueue::updateConnStatus(EReadStatus rst, EConnectStatus cst, const CPacket* pkt)
 {
     vector<LinkStatusInfo> toRemove, toProcess;
@@ -1719,10 +1662,6 @@ EConnectStatus CRcvQueue::worker_ProcessConnectionRequest(CPacket& packet, const
         }
     }
 
-    // NOTE: Rendezvous sockets do bind(), but not listen(). It means that the socket is
-    // ready to accept connection requests, but they are not being redirected to the listener
-    // socket, as this is not a listener socket at all. This goes then HERE.
-
     if (have_listener) // That is, the default socket is a listener and has processed the packet
     {
         LOGC(cnlog.Debug,
@@ -1741,16 +1680,47 @@ EConnectStatus CRcvQueue::worker_ProcessConnectionRequest(CPacket& packet, const
         HLOGC(cnlog.Debug, log << "connection request to an accepted socket failed. Will retry RDV or store");
     }
 
-    // If there is no listener waiting for that packet, try a rendezvous socket
-    // for the incoming address. This is then regardless if the peer knows the
-    // proper ID or not. Anyway, if the proper ID was supplied, it would be handled
-    // earlier by retrievePending called from worker_ProcessAddressedPacket.
-    CUDT* u = m_parent->retrieveRID(addr, SRT_SOCKID_CONNREQ);
-    if (!u)
+    // If there is no listener waiting for that packet, try the rendezvous socket.
+    // If the peer knows the proper ID, the packet is handled earlier by
+    // rcv_AcquireTargetSocket in worker_ProcessUnit.
+    return worker_ProcessRendezvousRequest(packet, addr);
+}
+
+EConnectStatus CRcvQueue::worker_ProcessRendezvousRequest(const CPacket& packet, const sockaddr_any& addr)
+{
+    // Unlike the listener, the rendezvous socket is processed without keeping
+    // the default socket slot locked, as it releases the slot when it gets
+    // connected. It is acquired instead, so that it can't be deleted meanwhile.
+    SocketKeeper sk (CUDT::uglobal(), CUDT::uglobal().acquireDefaultSocket(*m_parent), false);
+    if (!sk.socket)
     {
-        HLOGC(cnlog.Debug, log << CONID()
-                << "worker_ProcessConnectionRequest: no sockets expect connection from " << addr.str()
-                << " - POSSIBLE ATTACK, ignore packet");
+        HLOGC(cnlog.Debug, log << "worker_ProcessConnectionRequest: no sockets expect connection from "
+                << addr.str() << " - POSSIBLE ATTACK, ignore packet");
+        return CONN_AGAIN;
+    }
+
+    CUDT* u = &sk.socket->core();
+    switch (u->m_State)
+    {
+        case CUDT::SSS_RDV_WAVING:
+            // fallthrough
+        case CUDT::SSS_RDV_ATTENTION:
+            // fallthrough
+        case CUDT::SSS_RDV_FINE:
+            // fallthrough
+        case CUDT::SSS_RDV_INITIATED:
+            break;
+        default:
+            HLOGC(cnlog.Debug, log << u->CONID() << "worker_ProcessConnectionRequest: default socket not in rendezvous,"
+                    " ignore packet from " << addr.str());
+            return CONN_AGAIN;
+    }
+
+    // The rendezvous socket expects the packets from its peer only.
+    if (!(u->m_PeerAddr == addr))
+    {
+        HLOGC(cnlog.Debug, log << u->CONID() << "worker_ProcessConnectionRequest: rendezvous peer is "
+                << u->m_PeerAddr.str() << " - POSSIBLE ATTACK, ignore packet from " << addr.str());
         return CONN_AGAIN;
     }
 
