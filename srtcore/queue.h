@@ -837,9 +837,6 @@ private:
 #endif
 
 private:
-    bool setListener(CUDT* u);
-    CUDT* getListener();
-    bool removeListener(CUDT* u);
     bool setDefaultSocket(CUDT* u);
     CUDT* getDefaultSocket();
     bool removeDefaultSocket(CUDT* u);
@@ -854,12 +851,12 @@ private:
     void updateConnStatus(EReadStatus rst, EConnectStatus cst, const CPacket* pkt);
 
 private:
-    sync::CSharedObjectPtr<CUDT> m_pListener;        // pointer to the (unique, if any) listening UDT entity
-
     // The socket that receives the packets addressed to socket ID 0 on this
     // multiplexer (listener or rendezvous socket). It is unique: several SRT
     // sockets may share the multiplexer (SRTO_REUSEADDR), but only one of them
-    // can be the default socket.
+    // can be the default socket. The worker keeps it shared-locked while a
+    // listener processes a packet, so it must be exclusively locked (claimed
+    // or released) only by its owner, see CUDT::releaseDefaultSocket().
     sync::CSharedObjectPtr<CUDT> m_pDefaultSocket;
 
     void registerConnector(const SRTSOCKET&                      id,
@@ -1090,9 +1087,6 @@ public:
     void stop();
     ~CMultiplexer();
 
-    bool removeListener(CUDT* u) { return m_RcvQueue.removeListener(u); }
-    int setListener(CUDT* u) { return m_RcvQueue.setListener(u); }
-    CUDT* getListener() { return m_RcvQueue.getListener(); }
     bool setDefaultSocket(CUDT* u) { return m_RcvQueue.setDefaultSocket(u); }
     CUDT* getDefaultSocket() { return m_RcvQueue.getDefaultSocket(); }
     bool removeDefaultSocket(CUDT* u) { return m_RcvQueue.removeDefaultSocket(u); }

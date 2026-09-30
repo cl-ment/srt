@@ -738,12 +738,10 @@ void CUDTUnited::swipeSocket_LOCKED(SRTSOCKET id, CUDTSocket* s, CUDTUnited::Swi
     }
 }
 
-// XXX NOTE: TSan reports here false positive against the call
-// to CRcvQueue::removeListener. This here will apply shared
-// lock on m_GlobControlLock in the call of locateSocket, while
-// having applied a shared lock on CRcvQueue::m_pListener in
-// CRcvQueue::worker_ProcessConnectionRequest. As this thread
-// locks both mutexes as shared, it doesn't form a deadlock.
+// NOTE: This is called by the worker thread while holding a shared lock
+// on CRcvQueue::m_pDefaultSocket (the listener). No thread may lock this
+// slot exclusively while holding m_GlobControlLock: only the owner of the
+// slot (this listener) does it, when closing, see CUDT::releaseDefaultSocket().
 int CUDTUnited::newConnection(const SRTSOCKET     listener,
                                    const sockaddr_any& peer,
                                    const CPacket&      hspkt,
@@ -3725,7 +3723,7 @@ CMultiplexer* CUDTUnited::tryUnbindClosedSocket(const SRTSOCKET u)
 
     // Unpin this socket from the multiplexer.
     s->m_iMuxID = -1;
-    mux->removeDefaultSocket(&s->core());
+    s->core().releaseDefaultSocket();
     mux->deleteSocket(u);
 
     // XXX HERE PURGE THE SENDER AND RECEIVER BUFFERS !!!
@@ -3852,7 +3850,7 @@ CMultiplexer* CUDTUnited::tryRemoveClosedSocket(const SRTSOCKET u)
         {
             // Unpin this socket from the multiplexer.
             s->m_iMuxID = -1;
-            mux->removeDefaultSocket(&s->core());
+            s->core().releaseDefaultSocket();
             mux->deleteSocket(u);
             HLOGC(smlog.Debug, log << CONID(u) << "deleted from MUXER and cleared muxer ID");
         }

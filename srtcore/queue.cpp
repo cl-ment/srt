@@ -1693,22 +1693,29 @@ EConnectStatus CRcvQueue::worker_ProcessConnectionRequest(CPacket& packet, const
     int  listener_ret  = SRT_REJ_UNKNOWN;
     bool have_listener = false;
     {
-        SharedLock shl(m_pListener);
-        CUDT*      pListener = m_pListener.get_locked(shl);
+        // The shared lock prevents the default socket from being released
+        // (the listener from being closed) while it processes the packet.
+        SharedLock shl(m_pDefaultSocket);
+        CUDT*      pDefault = m_pDefaultSocket.get_locked(shl);
 
-        if (pListener)
+        switch (pDefault ? int(pDefault->m_State) : -1)
         {
-            LOGC(cnlog.Debug, log << "PASSING request from: " << addr.str() << " to listener:" << pListener->socketID());
-            // TO_REMOVE listener_ret = pListener->processConnectRequest(addr, packet);
-            listener_ret = pListener->handlePacketListening(packet);
+            case CUDT::SSS_LISTENING:
+                LOGC(cnlog.Debug, log << "PASSING request from: " << addr.str() << " to listener:" << pDefault->socketID());
+                listener_ret = pDefault->handlePacketListening(packet);
 
-            // This function does return a code, but it's hard to say as to whether
-            // anything can be done about it. In case when it's stated possible, the
-            // listener will try to send some rejection response to the caller, but
-            // that's already done inside this function. So it's only used for
-            // displaying the error in logs.
+                // This function does return a code, but it's hard to say as to whether
+                // anything can be done about it. In case when it's stated possible, the
+                // listener will try to send some rejection response to the caller, but
+                // that's already done inside this function. So it's only used for
+                // displaying the error in logs.
 
-            have_listener = true;
+                have_listener = true;
+                break;
+
+            default:
+                // No default socket, or a rendezvous socket: handled below.
+                break;
         }
     }
 
@@ -1716,7 +1723,7 @@ EConnectStatus CRcvQueue::worker_ProcessConnectionRequest(CPacket& packet, const
     // ready to accept connection requests, but they are not being redirected to the listener
     // socket, as this is not a listener socket at all. This goes then HERE.
 
-    if (have_listener) // That is, the above block with m_pListener->processConnectRequest was executed
+    if (have_listener) // That is, the default socket is a listener and has processed the packet
     {
         LOGC(cnlog.Debug,
              log << CONID() << "Listener got the connection request from: " << addr.str()
@@ -1837,29 +1844,6 @@ EConnectStatus CRcvQueue::worker_RetryOrRendezvous(CUDT* u, const CPacket& packe
         m_parent->resetExpiredRID(vector<LinkStatusInfo>(1, fi));
     }
     return cst;
-}
-
-bool CRcvQueue::setListener(CUDT* u)
-{
-    return m_pListener.compare_exchange(NULL, u);
-}
-
-CUDT* CRcvQueue::getListener()
-{
-    SharedLock lkl (m_pListener);
-    return m_pListener.get_locked(lkl);
-}
-
-// XXX NOTE: TSan reports here false positive against the call
-// to locateSocket in CUDTUnited::newConnection. This here will apply
-// exclusive lock on m_pListener, while keeping shared lock on
-// CUDTUnited::m_GlobControlLock in CUDTUnited::closeAllSockets.
-// As the other thread locks both as shared, this is no deadlock risk.
-bool CRcvQueue::removeListener(CUDT* u)
-{
-    bool rem = m_pListener.compare_exchange(u, NULL);
-    // DO NOT delete socket here. Just listener.
-    return rem;
 }
 
 bool CRcvQueue::setDefaultSocket(CUDT* u)

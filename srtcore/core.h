@@ -635,11 +635,20 @@ public: // internal API
     // immediately to free the socket
     int notListening()
     {
-        // TO REMOVE m_bListening = false;
-        m_pMuxer->removeListener(this);
-        m_pMuxer->removeDefaultSocket(this);
+        releaseDefaultSocket();
         return m_pMuxer->id();
     }
+
+    /// Makes this socket the default socket of its multiplexer, that is, the
+    /// one receiving the packets addressed to socket ID 0 (listener or
+    /// rendezvous socket).
+    /// @return false if another socket is already the default socket.
+    bool claimDefaultSocket();
+
+    /// Releases the default socket slot of the multiplexer, if this socket
+    /// occupies it. The slot is locked only by its owner, so this can be called
+    /// for any socket, also under m_GlobControlLock.
+    void releaseDefaultSocket();
 
     static int32_t generateISN()
     {
@@ -1201,6 +1210,7 @@ private:
     sync::atomic<bool> m_bPeerHealth;            // If the peer status is normal
     sync::atomic<bool> m_bManaged;               // The socket should be closed automatically if broken
     sync::atomic<bool> m_bOpened;                // If the UDT entity has been opened
+    sync::atomic<bool> m_bDefaultSocket;         // If this is the default socket of its multiplexer
     sync::atomic<int> m_RejectReason;
     // If the socket was closed by some reason locally, the reason is
     // in m_AgentCloseReason and the m_PeerCloseReason is then SRT_CLS_UNKNOWN.

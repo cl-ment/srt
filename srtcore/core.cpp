@@ -429,6 +429,7 @@ void CUDT::construct()
     m_PeerID              = SRT_SOCKID_CONNREQ;
     m_State               = CUDT::SSS_INIT;
     m_bOpened             = false;
+    m_bDefaultSocket      = false;
 #ifdef TO_REMOVE
     m_bListening          = false;
     m_bConnecting         = false;
@@ -1181,58 +1182,45 @@ void CUDT::open()
     m_bOpened = true;
 }
 
+bool CUDT::claimDefaultSocket()
+{
+    if (!m_pMuxer->setDefaultSocket(this))
+        return false;
+    m_bDefaultSocket = true;
+    return true;
+}
+
+void CUDT::releaseDefaultSocket()
+{
+    // Only the owner locks the slot. The worker thread keeps it shared-locked
+    // while the listener processes a packet, which may lock m_GlobControlLock;
+    // locking the slot by any socket under m_GlobControlLock would deadlock.
+    if (m_pMuxer && m_bDefaultSocket.compare_exchange(true, false))
+        m_pMuxer->removeDefaultSocket(this);
+}
+
 void CUDT::setListenState()
 {
     if (!m_bOpened)
         throw CUDTException(MJ_NOTSUP, MN_NONE, 0);
-#ifdef TO_REMOVE
-    if (m_bConnecting || m_bConnected)
-        throw CUDTException(MJ_NOTSUP, MN_ISCONNECTED, 0);
-#endif
+
     switch (m_State)
     {
         case CUDT::SSS_OPENED:
-            for (;;)
+            if (!m_State.compare_exchange(CUDT::SSS_OPENED, CUDT::SSS_LISTENING))
             {
-                if (m_State.compare_exchange(CUDT::SSS_OPENED, CUDT::SSS_LISTENING))
-                {
-                    // The listener receives the packets addressed to socket ID 0,
-                    // so it must be the default socket of the multiplexer.
-                    if (!m_pMuxer->setDefaultSocket(this))
-                    {
-                        setState(CUDT::SSS_OPENED);
-                        throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
-                    }
+                // Changed in the meantime by another thread.
+                if (m_State == CUDT::SSS_LISTENING)
+                    break;
+                throw CUDTException(MJ_NOTSUP, MN_NONE, 0);
+            }
 
-                    // if there is already another socket listening on the same port
-                    if (!m_pMuxer->setListener(this))
-                    {
-                        // Failed here, so 
-                        m_pMuxer->removeDefaultSocket(this);
-                        setState(CUDT::SSS_OPENED);
-                        throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
-                    }
-                }
-                else
-                {
-                    // Ok, this thread could have been blocked access,
-                    // but still the other thread that attempted to set
-                    // the listener could have failed. Therefore check
-                    // again if the listener was set successfully, and
-                    // if the listening point is still free, try again.
-                    CUDT* current = m_pMuxer->getListener();
-                    if (current == NULL)
-                    {
-                        continue;
-                    }
-                    else if (current != this)
-                    {
-                        // Some other listener already set it
-                        throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
-                    }
-                    // If it was you who set this, just return with no exception.
-                }
-                break;
+            // The listener receives the packets addressed to socket ID 0,
+            // so it must be the default socket of the multiplexer.
+            if (!claimDefaultSocket())
+            {
+                setState(CUDT::SSS_OPENED);
+                throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
             }
             break;
         case CUDT::SSS_RDV_WAVING:
@@ -1253,47 +1241,6 @@ void CUDT::setListenState()
             throw CUDTException(MJ_NOTSUP, MN_NONE, 0);
 
     }
-
-#ifdef TO_REMOVE
-    // listen can be called more than once
-    // If two threads call srt_listen at the same time, only
-    // one will pass this condition; others will be rejected.
-    // If it was called ever once, none will pass.
-    for (;;)
-    {
-        // TO _REMOVE if (m_bListening.compare_exchange(false, true))
-        if (m_State.compare_exchange(CUDT::SSS_INIT, CUDT::SSS_LISTENING))
-        {
-            // if there is already another socket listening on the same port
-            if (!m_pMuxer->setListener(this))
-            {
-                // Failed here, so 
-                setState(CUDT::SSS_INIT);
-                throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
-            }
-        }
-        else
-        {
-            // Ok, this thread could have been blocked access,
-            // but still the other thread that attempted to set
-            // the listener could have failed. Therefore check
-            // again if the listener was set successfully, and
-            // if the listening point is still free, try again.
-            CUDT* current = m_pMuxer->getListener();
-            if (current == NULL)
-            {
-                continue;
-            }
-            else if (current != this)
-            {
-                // Some other listener already set it
-                throw CUDTException(MJ_NOTSUP, MN_BUSY, 0);
-            }
-            // If it was you who set this, just return with no exception.
-        }
-        break;
-    }
-#endif
 }
 
 size_t CUDT::fillSrtHandshake(uint32_t *aw_srtdata, size_t srtlen, int msgtype, int hs_version)
@@ -4099,7 +4046,7 @@ void CUDT::startConnect(const sockaddr_any& serv_addr, int32_t forced_isn)
     }
     // The rendezvous socket receives the handshakes addressed to socket ID 0,
     // so it must be the default socket of the multiplexer.
-    if (m_config.bRendezvous && !m_pMuxer->setDefaultSocket(this))
+    if (m_config.bRendezvous && !claimDefaultSocket())
     {
         LOGC(cnlog.Error, log << CONID() << "startConnect: another socket (listener or rendezvous) already uses "
                 << m_pMuxer->selfAddr().str());
@@ -5934,8 +5881,7 @@ bool srt::CUDT::closeEntity(int reason) ATR_NOEXCEPT
     }
 
     // Release the default socket slot (listener or rendezvous), if occupied.
-    if (m_pMuxer)
-        m_pMuxer->removeDefaultSocket(this);
+    releaseDefaultSocket();
 
     if (!closeBasic(reason))
         return false;
@@ -5953,16 +5899,7 @@ bool srt::CUDT::closeEntity(int reason) ATR_NOEXCEPT
     switch (m_State)
     {
         case CUDT::SSS_LISTENING:
-            {
-                bool removed SRT_ATR_UNUSED = m_pMuxer->removeListener(this);
-                // NOTE: removeListener removes this socket as listener in the multiplexer,
-                // but DOES NOT remove the socket from the multiplerxer (YET).
-                if (!removed)
-                {
-                    LOGC(smlog.Error, log << CONID() << "CLOSING: IPE: listening=true but listener removal failed!");
-                }
-
-            }
+            // Already withdrawn from the default socket slot above.
             break;
         case CUDT::SSS_RDV_WAVING:
             // fallthrough
