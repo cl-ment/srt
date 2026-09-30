@@ -902,8 +902,8 @@ void CRcvQueue::updateConnStatus(EReadStatus rst, EConnectStatus cst, const CPac
     // Repeat (resend) connection request.
     for (vector<LinkStatusInfo>::iterator i = toProcess.begin(); i != toProcess.end(); ++i)
     {
-        // The incoming packet was already interpreted by `processCallerPacket` or
-        // `processRendezvousPacket`, so this call only (re)sends the handshake request
+        // The incoming packet was already interpreted by `CUDT::handle*Caller` or
+        // `CUDT::handle*Rendezvous`, so this call only (re)sends the handshake request
         // according to the socket state. The rendezvous handlers send their response
         // by themselves, so only a periodic resend happens here for them.
 
@@ -1065,7 +1065,7 @@ bool CMultiplexer::qualifyToHandleRID(EReadStatus    rst      SRT_ATR_UNUSED,
             tsLastReq + milliseconds_from(250); // Repeat connection request (send HS).
 
         // A connection request is repeated every 250 ms. The packet handlers
-        // (processCallerPacket, processRendezvousPacket) reset m_tsLastReqTime
+        // (CUDT::handle*Caller, CUDT::handle*Rendezvous) reset m_tsLastReqTime
         // when the response must be sent immediately, or send it by themselves.
         if (tsNow <= tsRepeat)
         {
@@ -1383,8 +1383,8 @@ void CRcvQueue::worker() ATR_NOEXCEPT
         // Check connection requests status for all sockets in the RendezvousQueue.
         // Pass the connection status from the last call of:
         // worker_RetrieveAndProcessUnit ---> worker_ProcessUnit ---> worker_HandlePacket ---> worker_Handle<Type> --->
-        // - caller:     CUDT::processCallerPacket
-        // - rendezvous: CUDT::processRendezvousPacket
+        // - caller:     CUDT::handle*Caller
+        // - rendezvous: CUDT::handle*Rendezvous
         //
         // NOTE: CONN_REJECT may be entering here, but it will be treated like CONN_AGAIN.
 
@@ -1545,40 +1545,36 @@ EConnectStatus CRcvQueue::worker_HandlePacket(CUDT& u, RcvUnit& unit, const sock
     if (!packet.isControl())
         return worker_HandleData(u, unit, (w_pkt));
 
+    // Control packet payload:
+    // - must be aligned to int32_t
+    // - cannot be 0 (msgs with no args use 4-byte zero-filled padding).
+    const size_t pktlen = packet.getLength();
+    if (!pktlen || pktlen % sizeof(int32_t) != 0)
+    {
+        LOGC(inlog.Error, log << u.CONID() << "EPE: incoming UMSG: " << packet.getType() << " INVALID SIZE: " << pktlen
+                << " (expected > 0 and aligned to " << sizeof(int32_t) << " bytes)");
+        return CONN_AGAIN;
+    }
+
+    HLOGC(inlog.Debug,
+          log << u.CONID() << "incoming UMSG:" << packet.getType() << " ("
+              << MessageTypeStr(packet.getType(), packet.getExtendedType())
+              << ") socket=@" << packet.id()
+              << " arg=" << packet.getAckSeqNo() << "/0x" << fmt(packet.getAckSeqNo(), hex));
+
     switch (packet.getType())
     {
-        case UMSG_HANDSHAKE: // 000
-            return worker_HandleHandshake(u, packet, addr);
-
-        case UMSG_KEEPALIVE: // 001
-            return worker_HandleKeepalive(u, packet, &CUDT::processKeepalive);
-
-        case UMSG_ACK: // 010
-            return worker_HandleSessionCtrl(u, packet, &CUDT::processCtrlAck);
-
-        case UMSG_LOSSREPORT: // 011
-            return worker_HandleSessionCtrl(u, packet, &CUDT::processCtrlLossReport);
-
-        case UMSG_CGWARNING: // 100
-            return worker_HandleSessionCtrl(u, packet, &CUDT::processCtrlCgWarning);
-
-        case UMSG_SHUTDOWN: // 101
-            return worker_HandleShutdown(u, packet);
-
-        case UMSG_ACKACK: // 110
-            return worker_HandleSessionCtrl(u, packet, &CUDT::processCtrlAckAck);
-
-        case UMSG_DROPREQ: // 111
-            return worker_HandleSessionCtrl(u, packet, &CUDT::processCtrlDropReq);
-
-        case UMSG_PEERERROR: // 1000
-            return worker_HandleSessionCtrl(u, packet, &CUDT::processCtrlPeerError);
-
-        case UMSG_EXT: // 0x7FFF
-            return worker_HandleKeepalive(u, packet, &CUDT::processCtrlUserDefined);
-
-        default:
-            return worker_HandleSessionCtrl(u, packet, &CUDT::processCtrlUnknown);
+        case UMSG_HANDSHAKE:  return worker_HandleHandshake(u, packet, addr);  // 000
+        case UMSG_KEEPALIVE:  return worker_HandleKeepalive(u, packet);        // 001
+        case UMSG_ACK:        return worker_HandleAck(u, packet);              // 010
+        case UMSG_LOSSREPORT: return worker_HandleLossReport(u, packet);       // 011
+        case UMSG_CGWARNING:  return worker_HandleCgWarning(u, packet);        // 100
+        case UMSG_SHUTDOWN:   return worker_HandleShutdown(u, packet);         // 101
+        case UMSG_ACKACK:     return worker_HandleAckAck(u, packet);           // 110
+        case UMSG_DROPREQ:    return worker_HandleDropReq(u, packet);          // 111
+        case UMSG_PEERERROR:  return worker_HandlePeerError(u, packet);        // 1000
+        case UMSG_EXT:        return worker_HandleExt(u, packet);              // 0x7FFF
+        default:              return worker_HandleUnknownCtrl(u, packet);
     }
 }
 
@@ -1588,12 +1584,13 @@ EConnectStatus CRcvQueue::worker_HandleData(CUDT& u, RcvUnit& unit, const CPacke
     {
         case CUDT::SSS_CONNECTED:
             worker_PassDataToConnected(u, unit, (w_pkt));
+            worker_PostDispatch(u);
             return CONN_CONTINUE;
 
         case CUDT::SSS_CALLER_INDUCTION:
             // fallthrough
         case CUDT::SSS_CALLER_CONCLUSION:
-            return worker_PassToCaller(u, unit.m_Packet, &CUDT::handleUnexpectedCaller);
+            return worker_AfterCaller(u, unit.m_Packet, u.handleUnexpectedCaller(unit.m_Packet));
 
         case CUDT::SSS_RDV_WAVING:
             // fallthrough
@@ -1603,7 +1600,7 @@ EConnectStatus CRcvQueue::worker_HandleData(CUDT& u, RcvUnit& unit, const CPacke
             // fallthrough
         case CUDT::SSS_RDV_INITIATED:
             // The peer considers itself connected already.
-            return worker_PassToRendezvous(u, unit.m_Packet, &CUDT::handlePeerConnectedRendezvous);
+            return worker_AfterRendezvous(u, u.handlePeerConnectedRendezvous(unit.m_Packet));
 
         default:
             return worker_HandleNotConnected(u, unit.m_Packet);
@@ -1627,11 +1624,14 @@ EConnectStatus CRcvQueue::worker_HandleHandshake(CUDT& u, CPacket& packet, const
             return worker_PassToListener(u, packet, addr);
 
         case CUDT::SSS_CALLER_INDUCTION:
-            // fallthrough
+            if (connreq)
+                break;
+            return worker_AfterCaller(u, packet, u.handleHandshakeInductionCaller(packet));
+
         case CUDT::SSS_CALLER_CONCLUSION:
             if (connreq)
                 break;
-            return worker_PassToCaller(u, packet, &CUDT::handleHandshakeCaller);
+            return worker_AfterCaller(u, packet, u.handleHandshakeConclusionCaller(packet));
 
         case CUDT::SSS_RDV_WAVING:
             // fallthrough
@@ -1643,13 +1643,15 @@ EConnectStatus CRcvQueue::worker_HandleHandshake(CUDT& u, CPacket& packet, const
             // The rendezvous socket expects the connection requests from its peer only.
             if (connreq && !(u.m_PeerAddr == addr))
                 break;
-            return worker_PassToRendezvous(u, packet, &CUDT::handleHandshakeRendezvous);
+            return worker_AfterRendezvous(u, u.handleHandshakeRendezvous(packet));
 
         case CUDT::SSS_CONNECTED:
             if (connreq)
                 break;
             // Belated handshake or rejection from the peer.
-            worker_PassCtrlToConnected(u, packet, &CUDT::processCtrlHS);
+            u.notePeerResponse();
+            u.processCtrlHS(packet);
+            worker_PostDispatch(u);
             return CONN_CONTINUE;
 
         default:
@@ -1664,48 +1666,64 @@ EConnectStatus CRcvQueue::worker_HandleHandshake(CUDT& u, CPacket& packet, const
     return worker_TryAcceptedSocket(packet, addr) ? CONN_CONTINUE : CONN_AGAIN;
 }
 
+// UMSG_KEEPALIVE: while connecting a rendezvous socket, it means that the
+// peer considers itself connected already.
+EConnectStatus CRcvQueue::worker_HandleKeepalive(CUDT& u, const CPacket& packet)
+{
+    switch (u.m_State)
+    {
+        case CUDT::SSS_CONNECTED:
+            u.processKeepalive(packet, u.notePeerResponse());
+            worker_PostDispatch(u);
+            return CONN_CONTINUE;
+
+        case CUDT::SSS_RDV_WAVING:
+            // fallthrough
+        case CUDT::SSS_RDV_ATTENTION:
+            // fallthrough
+        case CUDT::SSS_RDV_FINE:
+            // fallthrough
+        case CUDT::SSS_RDV_INITIATED:
+            return worker_AfterRendezvous(u, u.handlePeerConnectedRendezvous(packet));
+
+        default:
+            return worker_HandleUnexpectedCtrl(u, packet);
+    }
+}
+
 // UMSG_SHUTDOWN: the peer closes the connection, or refuses it while connecting.
-EConnectStatus CRcvQueue::worker_HandleShutdown(CUDT& u, CPacket& packet)
+EConnectStatus CRcvQueue::worker_HandleShutdown(CUDT& u, const CPacket& packet)
 {
     switch (u.m_State)
     {
         case CUDT::SSS_CONNECTED:
-            worker_PassCtrlToConnected(u, packet, &CUDT::processCtrlShutdown);
+            u.notePeerResponse();
+            u.processCtrlShutdown(packet);
+            worker_PostDispatch(u);
             return CONN_CONTINUE;
 
         case CUDT::SSS_CALLER_INDUCTION:
             // fallthrough
         case CUDT::SSS_CALLER_CONCLUSION:
-            return worker_PassToCaller(u, packet, &CUDT::handleShutdownCaller);
-
-        case CUDT::SSS_RDV_WAVING:
-            // fallthrough
-        case CUDT::SSS_RDV_ATTENTION:
-            // fallthrough
-        case CUDT::SSS_RDV_FINE:
-            // fallthrough
-        case CUDT::SSS_RDV_INITIATED:
-            return worker_PassToRendezvous(u, packet, &CUDT::handleUnexpectedRendezvous);
+            return worker_AfterCaller(u, packet, u.handleShutdownCaller(packet));
 
         default:
-            return worker_HandleNotConnected(u, packet);
+            return worker_HandleUnexpectedCtrl(u, packet);
     }
 }
 
-// UMSG_KEEPALIVE, UMSG_EXT: while connecting a rendezvous socket, they mean
-// that the peer considers itself connected already.
-EConnectStatus CRcvQueue::worker_HandleKeepalive(CUDT& u, CPacket& packet, CUDTCtrlHandler handler)
+// UMSG_EXT: SRT extended control message (HSv4 handshake, KM refresh, congctl).
+// While connecting a rendezvous socket, it means that the peer considers itself
+// connected already.
+EConnectStatus CRcvQueue::worker_HandleExt(CUDT& u, const CPacket& packet)
 {
     switch (u.m_State)
     {
         case CUDT::SSS_CONNECTED:
-            worker_PassCtrlToConnected(u, packet, handler);
+            u.notePeerResponse();
+            u.processCtrlUserDefined(packet);
+            worker_PostDispatch(u);
             return CONN_CONTINUE;
-
-        case CUDT::SSS_CALLER_INDUCTION:
-            // fallthrough
-        case CUDT::SSS_CALLER_CONCLUSION:
-            return worker_PassToCaller(u, packet, &CUDT::handleUnexpectedCaller);
 
         case CUDT::SSS_RDV_WAVING:
             // fallthrough
@@ -1714,26 +1732,132 @@ EConnectStatus CRcvQueue::worker_HandleKeepalive(CUDT& u, CPacket& packet, CUDTC
         case CUDT::SSS_RDV_FINE:
             // fallthrough
         case CUDT::SSS_RDV_INITIATED:
-            return worker_PassToRendezvous(u, packet, &CUDT::handlePeerConnectedRendezvous);
+            return worker_AfterRendezvous(u, u.handlePeerConnectedRendezvous(packet));
 
         default:
-            return worker_HandleNotConnected(u, packet);
+            return worker_HandleUnexpectedCtrl(u, packet);
     }
 }
 
-// Control packets of the connected session (ACK, ACKACK, LOSSREPORT, DROPREQ...).
-EConnectStatus CRcvQueue::worker_HandleSessionCtrl(CUDT& u, CPacket& packet, CUDTCtrlHandler handler)
+// UMSG_ACK: acknowledgement of received data.
+EConnectStatus CRcvQueue::worker_HandleAck(CUDT& u, const CPacket& packet)
 {
     switch (u.m_State)
     {
         case CUDT::SSS_CONNECTED:
-            worker_PassCtrlToConnected(u, packet, handler);
+            u.processCtrlAck(packet, u.notePeerResponse());
+            worker_PostDispatch(u);
             return CONN_CONTINUE;
 
+        default:
+            return worker_HandleUnexpectedCtrl(u, packet);
+    }
+}
+
+// UMSG_ACKACK: acknowledgement of an ACK (used to measure the RTT).
+EConnectStatus CRcvQueue::worker_HandleAckAck(CUDT& u, const CPacket& packet)
+{
+    switch (u.m_State)
+    {
+        case CUDT::SSS_CONNECTED:
+            u.processCtrlAckAck(packet, u.notePeerResponse());
+            worker_PostDispatch(u);
+            return CONN_CONTINUE;
+
+        default:
+            return worker_HandleUnexpectedCtrl(u, packet);
+    }
+}
+
+// UMSG_LOSSREPORT: the peer reports lost packets.
+EConnectStatus CRcvQueue::worker_HandleLossReport(CUDT& u, const CPacket& packet)
+{
+    switch (u.m_State)
+    {
+        case CUDT::SSS_CONNECTED:
+            u.notePeerResponse();
+            u.processCtrlLossReport(packet);
+            worker_PostDispatch(u);
+            return CONN_CONTINUE;
+
+        default:
+            return worker_HandleUnexpectedCtrl(u, packet);
+    }
+}
+
+// UMSG_CGWARNING: the one way delay is increasing.
+EConnectStatus CRcvQueue::worker_HandleCgWarning(CUDT& u, const CPacket& packet)
+{
+    switch (u.m_State)
+    {
+        case CUDT::SSS_CONNECTED:
+            u.notePeerResponse();
+            u.processCtrlCgWarning();
+            worker_PostDispatch(u);
+            return CONN_CONTINUE;
+
+        default:
+            return worker_HandleUnexpectedCtrl(u, packet);
+    }
+}
+
+// UMSG_DROPREQ: the peer requests to drop a message.
+EConnectStatus CRcvQueue::worker_HandleDropReq(CUDT& u, const CPacket& packet)
+{
+    switch (u.m_State)
+    {
+        case CUDT::SSS_CONNECTED:
+            u.notePeerResponse();
+            u.processCtrlDropReq(packet);
+            worker_PostDispatch(u);
+            return CONN_CONTINUE;
+
+        default:
+            return worker_HandleUnexpectedCtrl(u, packet);
+    }
+}
+
+// UMSG_PEERERROR: an error has happened on the peer side.
+EConnectStatus CRcvQueue::worker_HandlePeerError(CUDT& u, const CPacket& packet)
+{
+    switch (u.m_State)
+    {
+        case CUDT::SSS_CONNECTED:
+            u.notePeerResponse();
+            u.processCtrlPeerError();
+            worker_PostDispatch(u);
+            return CONN_CONTINUE;
+
+        default:
+            return worker_HandleUnexpectedCtrl(u, packet);
+    }
+}
+
+// Unknown control packet type: ignored.
+EConnectStatus CRcvQueue::worker_HandleUnknownCtrl(CUDT& u, const CPacket& packet)
+{
+    switch (u.m_State)
+    {
+        case CUDT::SSS_CONNECTED:
+            u.notePeerResponse();
+            HLOGC(inlog.Debug, log << u.CONID() << "incoming UMSG: unknown type " << packet.getType() << " - IGNORED");
+            worker_PostDispatch(u);
+            return CONN_CONTINUE;
+
+        default:
+            return worker_HandleUnexpectedCtrl(u, packet);
+    }
+}
+
+// A control packet that is not expected in the socket state.
+EConnectStatus CRcvQueue::worker_HandleUnexpectedCtrl(CUDT& u, const CPacket& packet)
+{
+    switch (u.m_State)
+    {
         case CUDT::SSS_CALLER_INDUCTION:
             // fallthrough
         case CUDT::SSS_CALLER_CONCLUSION:
-            return worker_PassToCaller(u, packet, &CUDT::handleUnexpectedCaller);
+            return worker_AfterCaller(u, packet, u.handleUnexpectedCaller(packet));
 
         case CUDT::SSS_RDV_WAVING:
             // fallthrough
@@ -1742,7 +1866,7 @@ EConnectStatus CRcvQueue::worker_HandleSessionCtrl(CUDT& u, CPacket& packet, CUD
         case CUDT::SSS_RDV_FINE:
             // fallthrough
         case CUDT::SSS_RDV_INITIATED:
-            return worker_PassToRendezvous(u, packet, &CUDT::handleUnexpectedRendezvous);
+            return worker_AfterRendezvous(u, u.handleUnexpectedRendezvous(packet));
 
         default:
             return worker_HandleNotConnected(u, packet);
@@ -1773,24 +1897,24 @@ EConnectStatus CRcvQueue::worker_PassToListener(CUDT& u, CPacket& packet, const 
     return listener_ret == SRT_REJ_UNKNOWN ? CONN_CONTINUE : CONN_REJECT;
 }
 
-EConnectStatus CRcvQueue::worker_PassToCaller(CUDT& u, const CPacket& packet, CUDTConnectingHandler handler)
+// Queue side effects of a packet processed by a connecting caller socket.
+EConnectStatus CRcvQueue::worker_AfterCaller(CUDT& u, const CPacket& packet, EConnectStatus cst)
 {
-    const EConnectStatus cst = u.processCallerPacket(packet, handler);
     if (cst == CONN_CONFUSED)
     {
         // The handshake request will be resent by updateConnStatus,
         // which is called next for this packet's destination socket.
-        LOGC(cnlog.Warn, log << u.CONID() << "worker_PassToCaller: PACKET NOT HANDSHAKE - re-requesting handshake from peer");
+        LOGC(cnlog.Warn, log << u.CONID() << "worker_AfterCaller: PACKET NOT HANDSHAKE - re-requesting handshake from peer");
         storePktClone(u.id(), packet);
         return CONN_CONTINUE;
     }
     return cst;
 }
 
-EConnectStatus CRcvQueue::worker_PassToRendezvous(CUDT& u, const CPacket& packet, CUDTConnectingHandler handler)
+// Queue side effects of a packet processed by a connecting rendezvous socket.
+// The handlers send their response by themselves.
+EConnectStatus CRcvQueue::worker_AfterRendezvous(CUDT& u, EConnectStatus cst)
 {
-    // The handlers send their response by themselves.
-    const EConnectStatus cst = u.processRendezvousPacket(packet, handler);
     if (cst == CONN_REJECT)
     {
         // The packet may be addressed to id 0 (first rendezvous packets), so
@@ -1800,16 +1924,6 @@ EConnectStatus CRcvQueue::worker_PassToRendezvous(CUDT& u, const CPacket& packet
         m_parent->resetExpiredRID(vector<LinkStatusInfo>(1, fi));
     }
     return cst;
-}
-
-void CRcvQueue::worker_PassCtrlToConnected(CUDT& u, const CPacket& packet, CUDTCtrlHandler handler)
-{
-    HLOGC(cnlog.Debug, log << "Dispatching a CONTROL MESSAGE to @" << u.id());
-
-    // The unit is processed in place and the packet buffer is still
-    // in the local series pool.
-    u.processCtrl(packet, handler);
-    worker_PostDispatch(u);
 }
 
 void CRcvQueue::worker_PassDataToConnected(CUDT& u, RcvUnit& unit SRT_ATR_UNUSED, const CPacket*& w_pkt)
@@ -1836,7 +1950,6 @@ void CRcvQueue::worker_PassDataToConnected(CUDT& u, RcvUnit& unit SRT_ATR_UNUSED
 #else
     u.processData(&unit, this);
 #endif
-    worker_PostDispatch(u);
 }
 
 // Updates a connected socket after it has processed a packet.

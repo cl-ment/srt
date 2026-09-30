@@ -18,18 +18,8 @@ namespace srt {
     public:
         CUDT* core;
 
-        bool processCtrl(const CPacket& pkt)
-        {
-            CUDT::CtrlHandler h = &CUDT::processCtrlUnknown;
-            switch (pkt.getType())
-            {
-            case UMSG_DROPREQ: h = &CUDT::processCtrlDropReq; break;
-            case UMSG_LOSSREPORT: h = &CUDT::processCtrlLossReport; break;
-            default: break;
-            }
-            return core->processCtrl(pkt, h);
-        }
-        void processCtrlLossReport(const CPacket& pkt) { core->processCtrlLossReport(pkt, sync::steady_clock::now()); }
+        bool processCtrlDropReq(const CPacket& pkt) { return core->processCtrlDropReq(pkt); }
+        bool processCtrlLossReport(const CPacket& pkt) { return core->processCtrlLossReport(pkt); }
         int32_t rcvCurrSeqNo() const { return core->m_iRcvCurrSeqNo; }
         void setRcvCurrSeqNo(int32_t v) { core->m_iRcvCurrSeqNo = v; }
         bool isBroken() const { return core->m_State == CUDT::SSS_BROKEN; }
@@ -103,7 +93,7 @@ TEST_F(ControlPackets, DropReqRejectsShortPayload)
     for (size_t i = 0; i < sizeof(short_lens) / sizeof(short_lens[0]); ++i)
     {
         pkt.setLength(short_lens[i]);
-        EXPECT_FALSE(cmock.processCtrl(pkt));
+        EXPECT_FALSE(cmock.processCtrlDropReq(pkt));
         EXPECT_EQ(cmock.rcvCurrSeqNo(), sentinel)
             << "DROPREQ with payload " << short_lens[i] << " bytes must not be processed";
     }
@@ -128,7 +118,7 @@ TEST_F(ControlPackets, DropReqRejectsReversedRange)
 
     // With the guard, this returns before touching m_pRcvBuffer (NULL on
     // an unconnected socket -- would crash if the guard were missing).
-    EXPECT_FALSE(cmock.processCtrl(pkt));
+    EXPECT_FALSE(cmock.processCtrlDropReq(pkt));
 
     EXPECT_EQ(cmock.rcvCurrSeqNo(), sentinel);
 }
@@ -150,7 +140,7 @@ TEST_F(ControlPackets, LossReportRejectsTrailingRangeFirst)
     pkt.setLength(sizeof(int32_t));
     pkt.setControl(UMSG_LOSSREPORT);
 
-    EXPECT_FALSE(cmock.processCtrl(pkt));
+    EXPECT_FALSE(cmock.processCtrlLossReport(pkt));
 
     EXPECT_TRUE(cmock.isBroken())
         << "LOSSREPORT with trailing range-first marker must take the "

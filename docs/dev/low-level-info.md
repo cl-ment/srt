@@ -197,13 +197,13 @@ CUDTUnited::listen
              CRcvQueue::setListener -- > [LOCKED m_LSLock]
     }
 
--- CUDT::processCallerPacket / CUDT::processRendezvousPacket
+-- CUDT::handle*Caller / CUDT::handle*Rendezvous
 
 CRcvQueue::worker ->
 ...
 CRcvQueue::worker_HandlePacket -> CRcvQueue::worker_Handle<Type>
-     CUDT::processCallerPacket -- > [LOCKED m_ConnectionLock]
-     (or CUDT::processRendezvousPacket -- > [LOCKED m_ConnectionLock])
+     CUDT::handle<Type>Caller -- > [LOCKED m_ConnectionLock]
+     (or CUDT::handle<Type>Rendezvous -- > [LOCKED m_ConnectionLock])
          [per-state handlers]
              CUDT::postConnect
                  CUDT::interpretSrtHandshake ->

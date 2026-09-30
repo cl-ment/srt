@@ -776,33 +776,39 @@ private:
     int handleHandshakeInductionListening(CPacket &packet, CHandShake &hs);
     int handleHandshakeListening(CPacket &packet);
 
-    // Handler of a packet received by a connecting (caller or rendezvous) socket,
-    // called with m_ConnectionLock locked.
-    typedef CUDTConnectingHandler ConnectingHandler;
-
     // Caller (non-rendezvous) side of the handshake state machine.
-    // Entry point from the receiver worker for packets addressed to a
-    // connecting caller socket: applies m_ConnectionLock, checks that the
-    // socket is still connecting and calls the handler for the packet type.
-    SRT_ATR_NODISCARD EConnectStatus processCallerPacket(const CPacket& packet, ConnectingHandler handler) ATR_NOEXCEPT;
-    EConnectStatus handleHandshakeCaller(const CPacket& packet);
-    EConnectStatus handleShutdownCaller(const CPacket& packet);
-    EConnectStatus handleUnexpectedCaller(const CPacket& packet);
-    EConnectStatus handleHandshakeInductionCaller(const CHandShake& hs) ATR_NOEXCEPT;
-    EConnectStatus handleHandshakeConclusionCaller(const CPacket& packet, const CHandShake& hs, CUDTException* eout) ATR_NOEXCEPT;
+    // The handle* functions are the entry points from the receiver worker, one
+    // per packet type and socket state: they apply m_ConnectionLock, check that
+    // the socket is still in the expected state, process the packet and reset
+    // the request time so that the next request is sent immediately.
+    SRT_ATR_NODISCARD EConnectStatus handleHandshakeInductionCaller(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_ATR_NODISCARD EConnectStatus handleHandshakeConclusionCaller(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_ATR_NODISCARD EConnectStatus handleShutdownCaller(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_ATR_NODISCARD EConnectStatus handleUnexpectedCaller(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
+    bool isConnectingCaller(const char* fn, const CPacket& packet) const;
+    SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
+    EConnectStatus endCallerStep(const char* fn, EConnectStatus cst);
+    SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
+    EConnectStatus processHandshakeInductionCaller(const CHandShake& hs);
+    SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
+    EConnectStatus processHandshakeConclusionCaller(const CPacket& packet, const CHandShake& hs);
     SRT_ATR_NODISCARD bool loadResponseHandshake(const CPacket& packet, CHandShake& w_hs);
 
     // Rendezvous side of the handshake state machine.
-    // Entry point from the receiver worker for packets addressed to a
-    // connecting rendezvous socket: applies m_ConnectionLock, checks that the
-    // socket is still connecting and calls the handler for the packet type.
-    SRT_ATR_NODISCARD EConnectStatus processRendezvousPacket(const CPacket& packet, ConnectingHandler handler) ATR_NOEXCEPT;
+    // The handle* functions are the entry points from the receiver worker, one
+    // per packet type: they apply m_ConnectionLock, check that the socket is
+    // still connecting, process the packet and wake up a blocking connect when
+    // the connection is established or rejected.
+    SRT_ATR_NODISCARD EConnectStatus handleHandshakeRendezvous(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_ATR_NODISCARD EConnectStatus handlePeerConnectedRendezvous(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_ATR_NODISCARD EConnectStatus handleUnexpectedRendezvous(const CPacket& packet) ATR_NOEXCEPT;
     SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
-    EConnectStatus handleUnexpectedRendezvous(const CPacket& packet);
+    bool isConnectingRendezvous(const char* fn, const CPacket& packet) const;
     SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
-    EConnectStatus handlePeerConnectedRendezvous(const CPacket& packet);
+    EConnectStatus endRendezvousStep(const char* fn, EConnectStatus cst);
     SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
-    EConnectStatus handleHandshakeRendezvous(const CPacket& packet);
+    EConnectStatus processHandshakeRendezvous(const CPacket& packet);
     SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
     EConnectStatus handleHandshakeRendezvousHSv4(const CPacket& packet);
     // Per-state HSv5 handlers: decide the response type and extension, and
@@ -1487,13 +1493,10 @@ private: // Generation and processing of packets
     int  sendCtrlAck(CPacket& ctrlpkt, int size);
     void sendLossReport(const std::vector< std::pair<int32_t, int32_t> >& losslist);
 
-    // Handler of a control packet received by a connected socket.
-    typedef CUDTCtrlHandler CtrlHandler;
-
-    /// @brief Process incoming control packet on a connected socket.
-    /// Updates the peer response time, validates the packet size and calls the handler
-    /// for the packet type.
-    bool processCtrl(const CPacket& ctrlpkt, CtrlHandler handler);
+    /// @brief Records that a control packet has been received from the peer
+    /// (resets the expiration counter).
+    /// @returns the current time
+    time_point notePeerResponse();
 
     /// @brief Process incoming control ACK packet.
     /// @param ctrlpkt incoming ACK packet
@@ -1507,32 +1510,29 @@ private: // Generation and processing of packets
 
     /// @brief Process incoming loss report (NAK) packet.
     /// @param ctrlpkt incoming NAK packet
-    bool processCtrlLossReport(const CPacket& ctrlpkt, const time_point& currtime);
+    bool processCtrlLossReport(const CPacket& ctrlpkt);
 
     /// @brief Process incoming handshake control packet
     /// @param ctrlpkt incoming HS packet
-    bool processCtrlHS(const CPacket& ctrlpkt, const time_point& currtime);
+    bool processCtrlHS(const CPacket& ctrlpkt);
     bool processCtrlHSRejection(const CHandShake& req);
 
     /// @brief Process incoming drop request control packet
     /// @param ctrlpkt incoming drop request packet
-    bool processCtrlDropReq(const CPacket& ctrlpkt, const time_point& currtime);
+    bool processCtrlDropReq(const CPacket& ctrlpkt);
 
     /// @brief Process incoming shutdown control packet
-    bool processCtrlShutdown(const CPacket& ctrlpkt, const time_point& currtime);
+    bool processCtrlShutdown(const CPacket& ctrlpkt);
     bool processCtrlShutdown(int reason = 0); // For manual use
     /// @brief Process incoming user defined control packet
     /// @param ctrlpkt incoming user defined packet
-    bool processCtrlUserDefined(const CPacket& ctrlpkt, const time_point& currtime);
+    bool processCtrlUserDefined(const CPacket& ctrlpkt);
 
     /// @brief Process incoming congestion warning (delay warning) packet
-    bool processCtrlCgWarning(const CPacket& ctrlpkt, const time_point& currtime);
+    void processCtrlCgWarning();
 
     /// @brief Process incoming peer error packet
-    bool processCtrlPeerError(const CPacket& ctrlpkt, const time_point& currtime);
-
-    /// @brief Unknown control packet type: ignored
-    bool processCtrlUnknown(const CPacket& ctrlpkt, const time_point& currtime);
+    void processCtrlPeerError();
 
     /// @brief Update sender side socket data according to incoming ACK message.
     ///
