@@ -1382,7 +1382,7 @@ void CRcvQueue::worker() ATR_NOEXCEPT
 
         // Check connection requests status for all sockets in the RendezvousQueue.
         // Pass the connection status from the last call of:
-        // worker_RetrieveAndProcessUnit ---> worker_ProcessUnit ---> worker_RetryOrRendezvous --->
+        // worker_RetrieveAndProcessUnit ---> worker_ProcessUnit ---> worker_HandlePacket --->
         // - caller:     CUDT::handlePacketCaller
         // - rendezvous: CUDT::handlePacketRendezvous
         //
@@ -1412,56 +1412,6 @@ EReadStatus CRcvQueue::worker_DropIncomingPacket()
     // Be transparent for RST_ERROR, but ignore the correct
     // data read and fake that the packet was dropped.
     return rst == RST_ERROR ? RST_ERROR : RST_AGAIN;
-}
-
-// Possible return values:
-// - CONN_CONTINUE: the socket is acquired, you can continue passing the packet to it.
-// - any other: this is an error, socket NOT acquired
-// must be static due to dependencies that can't be exposed to the interface
-static EConnectStatus rcv_AcquireTargetSocket(CMultiplexer* parent, SRTSOCKET id, const sockaddr_any& addr, SocketKeeper& w_sk, SocketHolder::State& w_hstate)
-{
-    w_hstate = SocketHolder::INIT;
-    CUDTSocket* s = parent->findAgent(id, addr, (w_hstate), parent->ACQ_ACQUIRE);
-    if (!s)
-    {
-        HLOGC(cnlog.Debug,
-                log << CUDTUnited::CONID(id) << "worker_ProcessAddressedPacket: socket @"
-                << id << " not found as expecting packet from " << addr.str()
-                << " - POSSIBLE ATTACK, ignore packet");
-        return CONN_AGAIN; // This means that the packet should be ignored.
-    }
-
-    // Test pending before checking for connected.
-    if (w_hstate == SocketHolder::PENDING)
-    {
-        w_sk.socket = s;
-        return CONN_CONTINUE;
-    }
-
-    // Although we don´t have an exclusive passing here,
-    // we can count on that when the socket was once present in the hash,
-    // it will not be deleted for at least one GC cycle. But we still need
-    // to maintain the object existence as long as it's in use.
-    // Note that here we are out of any locks, so m_GlobControlLock can be locked.
-
-    CUDT& u = s->core();
-    if (!u.stillConnected())
-    {
-        // Socket will be released in this block.
-        SocketKeeper sk = CUDT::keep_noacquire(s); // Acquired by findAgent() call
-        u.updateRejectReason(SRT_REJ_CLOSE);
-
-        HLOGC(cnlog.Debug, log << "worker_ProcessAddressedPacket: target @"
-                << id << " is being closed, rejecting");
-        // The socket is currently in the process of being disconnected
-        // or destroyed. Ignore.
-        // XXX send UMSG_SHUTDOWN in this case?
-        // XXX May it require mutex protection?
-        return CONN_REJECT;
-    }
-
-    w_sk.socket = s;
-    return CONN_CONTINUE;
 }
 
 // Reads the next incoming packet and dispatches it.
@@ -1543,165 +1493,75 @@ void CRcvQueue::worker_ProcessUnit(RcvUnit& unit, EConnectStatus& w_cst, const C
     // Can be later reset to NULL in case of a data packet.
     w_pkt = &unit.m_Packet;
 
-    // Note to rendezvous connection. This can accept:
-    // - ID == 0 - take the first waiting rendezvous socket that matches the address
-    // - ID > 0  - find the rendezvous socket that has this ID.
+    // Resolve the target socket:
+    // - ID 0: the default socket of the multiplexer (listener or rendezvous),
+    // - otherwise: the socket with this ID, expecting packets from this address.
+    SocketKeeper sk = CUDT::keep_none();
     if (w_id == SRT_SOCKID_CONNREQ)
     {
-        // ID 0 is for connection request, which should be passed to the listening socket or rendezvous sockets
-        // NOTE: packet can be rewritten so that it is reused for sending the response.
-        w_cst = worker_ProcessConnectionRequest( (unit.m_Packet), sa);
-        return;
+        sk.socket = CUDT::uglobal().acquireDefaultSocket(*m_parent);
+    }
+    else
+    {
+        SocketHolder::State hstate SRT_ATR_UNUSED;
+        sk.socket = m_parent->findAgent(w_id, sa, (hstate), m_parent->ACQ_ACQUIRE);
     }
 
-    // Otherwise ID is expected to be associated with:
-    // - an enqueued rendezvous socket
-    // - a socket connected to a peer
-    SocketKeeper sk = CUDT::keep_none();
-    SocketHolder::State hstate;
-    w_cst = rcv_AcquireTargetSocket(m_parent, w_id, sa, (sk), (hstate));
-    if (w_cst == CONN_CONTINUE)
+    if (!sk.socket)
     {
-        CUDT* u = &sk.socket->core();
-        if (hstate == SocketHolder::PENDING)
+        if (w_id == SRT_SOCKID_CONNREQ)
         {
-            HLOGC(cnlog.Debug, log << "worker: resending to PENDING socket @" << w_id);
-            w_cst = worker_RetryOrRendezvous(u, unit.m_Packet);
+            w_cst = worker_TryAcceptedSocket(unit.m_Packet, sa) ? CONN_CONTINUE : CONN_AGAIN;
             return;
         }
 
-        HLOGC(cnlog.Debug, log << "Dispatching a " << (unit.m_Packet.isControl() ? "CONTROL MESSAGE" : "DATA PACKET")
-                << " to @" << w_id);
-
-        if (unit.m_Packet.isControl())
-        {
-            // The unit is processed in place and the packet buffer is still
-            // in the local series pool.
-            u->processCtrl(unit.m_Packet);
-        }
-        else
-        {
-            // NOTE: Data packet is swallowed by the receiver buffer and shall
-            // not be referred to from here anymore.
-            w_pkt = NULL;
-
-#if USE_RECEIVER_UNIT_POOL
-            // We need to pop off the packet first, as *this will be
-            // potentially used to extract additional units from.  Might be,
-            // this unit will not be acquired, and in this case this function
-            // should return it to *this.
-            CPacketUnitPool::UnitPtr passunit;
-
-            // `passunit` will be same as `unit`, just owned this time.
-            // Existence ensured through viewUnit() so no need to check refill
-            retrieveUnit_raw((passunit));
-            u->acquireDataPacket((passunit), this); // passunit might be acquired
-            if (passunit) // did not acquire
-                returnUnit((passunit));
-#else
-            u->processData(&unit, this);
-#endif
-        }
-
-        // TO_REMOVE if (u->m_bBroken || u->m_bClosing)
-        if (u->m_State == CUDT::SSS_BROKEN || u->m_State == CUDT::SSS_CLOSING || u->m_State == CUDT::SSS_CLOSED)
-        {
-            // If these flags are set, the socket is no longer eligible for any
-            // updates, and they no longer are consistent as "former" group members.
-
-            return; // the packet has been handled.
-        }
-
-        HLOGC(cnlog.Debug, log << "POST-DISPATCH update for @" << w_id);
-        u->checkTimers();
-
-        // XXX Optimize it better
-        // We dispatch here `w_id` again because we can't keep the SocketEntry locked.
-        // Check, however, if keeping the socket through SocketKeeper can ensure that,
-        // so that this dispatching can be avoided.
-        m_parent->updateUpdateOrder(w_id, sync::steady_clock::now());
+        HLOGC(cnlog.Debug, log << CUDTUnited::CONID(w_id) << "worker_ProcessUnit: socket @" << w_id
+                << " not found as expecting packet from " << sa.str() << " - POSSIBLE ATTACK, ignore packet");
+        w_cst = CONN_AGAIN;
+        return;
     }
+
+    w_cst = worker_HandlePacket(sk.socket->core(), unit, sa, (w_pkt));
 
     // w_cst CAN BE CONN_REJECT, but m_RejectReason is already set
 }
 
-EConnectStatus CRcvQueue::worker_ProcessConnectionRequest(CPacket& packet, const sockaddr_any& addr)
+// Passes the packet to the handler of the target socket's state.
+// A packet addressed to ID 0 (connection request) is handled by the default
+// socket if it is a listener, or a connecting rendezvous socket and the packet
+// comes from its peer. Otherwise it can only be a repeated conclusion handshake
+// for an accepted socket.
+EConnectStatus CRcvQueue::worker_HandlePacket(CUDT& u, RcvUnit& unit, const sockaddr_any& addr, const CPacket*& w_pkt)
 {
-    HLOGC(cnlog.Debug,
-          log << "Got sockID=0 from " << addr.str() << " - trying to resolve it as a connection request...");
-    // Introduced protection because it may potentially happen
-    // that another thread could have closed the socket at
-    // the same time and inject a bug between checking the
-    // pointer for NULL and using it.
-    int  listener_ret  = SRT_REJ_UNKNOWN;
-    bool have_listener = false;
+    CPacket& packet = unit.m_Packet;
+    const bool connreq = packet.id() == SRT_SOCKID_CONNREQ;
+
+    const CUDT::SRTSocketState state = u.m_State;
+    switch (state)
     {
-        // The shared lock prevents the default socket from being released
-        // (the listener from being closed) while it processes the packet.
-        SharedLock shl(m_pDefaultSocket);
-        CUDT*      pDefault = m_pDefaultSocket.get_locked(shl);
-
-        switch (pDefault ? int(pDefault->m_State) : -1)
-        {
-            case CUDT::SSS_LISTENING:
-                LOGC(cnlog.Debug, log << "PASSING request from: " << addr.str() << " to listener:" << pDefault->socketID());
-                listener_ret = pDefault->handlePacketListening(packet);
-
-                // This function does return a code, but it's hard to say as to whether
-                // anything can be done about it. In case when it's stated possible, the
-                // listener will try to send some rejection response to the caller, but
-                // that's already done inside this function. So it's only used for
-                // displaying the error in logs.
-
-                have_listener = true;
+        case CUDT::SSS_LISTENING:
+            if (!connreq)
                 break;
+            return worker_HandleListening(u, packet, addr);
 
-            default:
-                // No default socket, or a rendezvous socket: handled below.
-                break;
-        }
-    }
+        case CUDT::SSS_CALLER_INDUCTION:
+            // fallthrough
+        case CUDT::SSS_CALLER_CONCLUSION:
+            {
+                if (connreq)
+                    break;
+                const EConnectStatus cst = u.handlePacketCaller(packet);
+                if (cst == CONN_CONFUSED)
+                {
+                    // The handshake request will be resent by updateConnStatus,
+                    // which is called next for this packet's destination socket.
+                    LOGC(cnlog.Warn, log << u.CONID() << "worker_HandlePacket: PACKET NOT HANDSHAKE - re-requesting handshake from peer");
+                    storePktClone(u.id(), packet);
+                    return CONN_CONTINUE;
+                }
+                return cst;
+            }
 
-    if (have_listener) // That is, the default socket is a listener and has processed the packet
-    {
-        LOGC(cnlog.Debug,
-             log << CONID() << "Listener got the connection request from: " << addr.str()
-                 << " result:" << RequestTypeStr(UDTRequestType(listener_ret)));
-        return listener_ret == SRT_REJ_UNKNOWN ? CONN_CONTINUE : CONN_REJECT;
-    }
-
-    if (worker_TryAcceptedSocket(packet, addr))
-    {
-        HLOGC(cnlog.Debug, log << "connection request to an accepted socket succeeded");
-        return CONN_CONTINUE;
-    }
-    else
-    {
-        HLOGC(cnlog.Debug, log << "connection request to an accepted socket failed. Will retry RDV or store");
-    }
-
-    // If there is no listener waiting for that packet, try the rendezvous socket.
-    // If the peer knows the proper ID, the packet is handled earlier by
-    // rcv_AcquireTargetSocket in worker_ProcessUnit.
-    return worker_ProcessRendezvousRequest(packet, addr);
-}
-
-EConnectStatus CRcvQueue::worker_ProcessRendezvousRequest(const CPacket& packet, const sockaddr_any& addr)
-{
-    // Unlike the listener, the rendezvous socket is processed without keeping
-    // the default socket slot locked, as it releases the slot when it gets
-    // connected. It is acquired instead, so that it can't be deleted meanwhile.
-    SocketKeeper sk (CUDT::uglobal(), CUDT::uglobal().acquireDefaultSocket(*m_parent), false);
-    if (!sk.socket)
-    {
-        HLOGC(cnlog.Debug, log << "worker_ProcessConnectionRequest: no sockets expect connection from "
-                << addr.str() << " - POSSIBLE ATTACK, ignore packet");
-        return CONN_AGAIN;
-    }
-
-    CUDT* u = &sk.socket->core();
-    switch (u->m_State)
-    {
         case CUDT::SSS_RDV_WAVING:
             // fallthrough
         case CUDT::SSS_RDV_ATTENTION:
@@ -1709,22 +1569,123 @@ EConnectStatus CRcvQueue::worker_ProcessRendezvousRequest(const CPacket& packet,
         case CUDT::SSS_RDV_FINE:
             // fallthrough
         case CUDT::SSS_RDV_INITIATED:
-            break;
+            {
+                // The rendezvous socket expects the connection requests from its peer only.
+                if (connreq && !(u.m_PeerAddr == addr))
+                    break;
+
+                // The handlers send their response by themselves.
+                // A non-handshake packet is a rejection in rendezvous mode.
+                const EConnectStatus cst = u.handlePacketRendezvous(packet);
+                if (cst == CONN_REJECT)
+                {
+                    // The packet may be addressed to id 0 (first rendezvous packets), so
+                    // updateConnStatus can't identify the socket: enforce its expiration
+                    // so that it's removed from the RID list and the error is reported.
+                    LinkStatusInfo fi = {&u, u.id(), SRT_ECONNREJ, sockaddr_any(), -1};
+                    m_parent->resetExpiredRID(vector<LinkStatusInfo>(1, fi));
+                }
+                return cst;
+            }
+
+        case CUDT::SSS_CONNECTED:
+            if (connreq)
+                break;
+            worker_HandleConnected(u, unit, (w_pkt));
+            return CONN_CONTINUE;
+
         default:
-            HLOGC(cnlog.Debug, log << u->CONID() << "worker_ProcessConnectionRequest: default socket not in rendezvous,"
-                    " ignore packet from " << addr.str());
-            return CONN_AGAIN;
+            if (connreq)
+                break;
+            // The socket is being disconnected or destroyed.
+            // XXX send UMSG_SHUTDOWN in this case?
+            u.updateRejectReason(SRT_REJ_CLOSE);
+            HLOGC(cnlog.Debug, log << u.CONID() << "worker_HandlePacket: target is "
+                    << CUDT::stateStr(state) << ", rejecting");
+            return CONN_REJECT;
     }
 
-    // The rendezvous socket expects the packets from its peer only.
-    if (!(u->m_PeerAddr == addr))
+    // Connection request not handled by the default socket.
+    HLOGC(cnlog.Debug, log << u.CONID() << "worker_HandlePacket: default socket is " << CUDT::stateStr(state)
+            << ", trying accepted sockets for connection request from " << addr.str());
+    return worker_TryAcceptedSocket(packet, addr) ? CONN_CONTINUE : CONN_AGAIN;
+}
+
+EConnectStatus CRcvQueue::worker_HandleListening(CUDT& u, CPacket& packet, const sockaddr_any& addr)
+{
+    // The shared lock prevents the listener from being closed (withdrawn from
+    // the default socket slot, see CUDT::notListening()) while it processes
+    // the packet.
+    SharedLock shl(m_pDefaultSocket);
+    if (m_pDefaultSocket.get_locked(shl) != &u)
     {
-        HLOGC(cnlog.Debug, log << u->CONID() << "worker_ProcessConnectionRequest: rendezvous peer is "
-                << u->m_PeerAddr.str() << " - POSSIBLE ATTACK, ignore packet from " << addr.str());
+        HLOGC(cnlog.Debug, log << u.CONID() << "worker_HandleListening: no longer listening, ignore packet from "
+                << addr.str());
         return CONN_AGAIN;
     }
 
-    return worker_RetryOrRendezvous(u, packet);
+    LOGC(cnlog.Debug, log << "PASSING request from: " << addr.str() << " to listener:" << u.socketID());
+
+    // The listener sends the response (or rejection) by itself. The result
+    // is only used for displaying the error in logs.
+    const int listener_ret = u.handlePacketListening(packet);
+
+    LOGC(cnlog.Debug, log << u.CONID() << "Listener got the connection request from: " << addr.str()
+            << " result:" << RequestTypeStr(UDTRequestType(listener_ret)));
+    return listener_ret == SRT_REJ_UNKNOWN ? CONN_CONTINUE : CONN_REJECT;
+}
+
+// Passes a packet (control or data) to a connected socket.
+void CRcvQueue::worker_HandleConnected(CUDT& u, RcvUnit& unit, const CPacket*& w_pkt)
+{
+    HLOGC(cnlog.Debug, log << "Dispatching a " << (unit.m_Packet.isControl() ? "CONTROL MESSAGE" : "DATA PACKET")
+            << " to @" << u.id());
+
+    if (unit.m_Packet.isControl())
+    {
+        // The unit is processed in place and the packet buffer is still
+        // in the local series pool.
+        u.processCtrl(unit.m_Packet);
+    }
+    else
+    {
+        // NOTE: Data packet is swallowed by the receiver buffer and shall
+        // not be referred to from here anymore.
+        w_pkt = NULL;
+
+#if USE_RECEIVER_UNIT_POOL
+        // We need to pop off the packet first, as *this will be
+        // potentially used to extract additional units from.  Might be,
+        // this unit will not be acquired, and in this case this function
+        // should return it to *this.
+        CPacketUnitPool::UnitPtr passunit;
+
+        // `passunit` will be same as `unit`, just owned this time.
+        // Existence ensured through viewUnit() so no need to check refill
+        retrieveUnit_raw((passunit));
+        u.acquireDataPacket((passunit), this); // passunit might be acquired
+        if (passunit) // did not acquire
+            returnUnit((passunit));
+#else
+        u.processData(&unit, this);
+#endif
+    }
+
+    if (u.m_State == CUDT::SSS_BROKEN || u.m_State == CUDT::SSS_CLOSING || u.m_State == CUDT::SSS_CLOSED)
+    {
+        // If these flags are set, the socket is no longer eligible for any
+        // updates, and they no longer are consistent as "former" group members.
+        return; // the packet has been handled.
+    }
+
+    HLOGC(cnlog.Debug, log << "POST-DISPATCH update for @" << u.id());
+    u.checkTimers();
+
+    // XXX Optimize it better
+    // We dispatch here the ID again because we can't keep the SocketEntry locked.
+    // Check, however, if keeping the socket through SocketKeeper can ensure that,
+    // so that this dispatching can be avoided.
+    m_parent->updateUpdateOrder(u.id(), sync::steady_clock::now());
 }
 
 bool CRcvQueue::worker_TryAcceptedSocket(const CPacket& pkt, const sockaddr_any& addr)
@@ -1781,39 +1742,6 @@ bool CRcvQueue::worker_TryAcceptedSocket(const CPacket& pkt, const sockaddr_any&
     }
 
     return u->createSendHSResponse_WITHLOCK(kmdata, kmdatasize, pkt.udpDestAddr(), (hs));
-}
-
-EConnectStatus CRcvQueue::worker_RetryOrRendezvous(CUDT* u, const CPacket& packet)
-{
-    HLOGC(cnlog.Debug, log << "worker_RetryOrRendezvous: packet RESOLVED TO @" << u->id() << " -- continuing as ASYNC CONNECT");
-    // The packet is dispatched to the state machine of the socket's mode,
-    // which applies m_ConnectionLock by itself.
-    if (!u->m_config.bRendezvous)
-    {
-        const EConnectStatus cst = u->handlePacketCaller(packet);
-        if (cst == CONN_CONFUSED)
-        {
-            // The handshake request will be resent by updateConnStatus,
-            // which is called next for this packet's destination socket.
-            LOGC(cnlog.Warn, log << "worker_RetryOrRendezvous: PACKET NOT HANDSHAKE - re-requesting handshake from peer");
-            storePktClone(u->id(), packet);
-            return CONN_CONTINUE;
-        }
-        return cst;
-    }
-
-    // Rendezvous: the handlers send their response by themselves.
-    // A non-handshake packet is a rejection in rendezvous mode.
-    const EConnectStatus cst = u->handlePacketRendezvous(packet);
-    if (cst == CONN_REJECT)
-    {
-        // The packet may be addressed to id 0 (first rendezvous packets), so
-        // updateConnStatus can't identify the socket: enforce its expiration
-        // so that it's removed from the RID list and the error is reported.
-        LinkStatusInfo fi = {u, u->id(), SRT_ECONNREJ, sockaddr_any(), -1};
-        m_parent->resetExpiredRID(vector<LinkStatusInfo>(1, fi));
-    }
-    return cst;
 }
 
 bool CRcvQueue::setDefaultSocket(CUDT* u)

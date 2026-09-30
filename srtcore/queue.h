@@ -796,9 +796,9 @@ private:
     EReadStatus worker_ReadUnit(RcvUnit*& w_unit);
     EReadStatus worker_DropIncomingPacket();
     void worker_ProcessUnit(RcvUnit& unit, EConnectStatus& w_cst, const CPacket*& w_pkt, SRTSOCKET& w_id);
-    EConnectStatus worker_ProcessConnectionRequest(CPacket& packet, const sockaddr_any& sa);
-    EConnectStatus worker_RetryOrRendezvous(CUDT* u, const CPacket& packet);
-    EConnectStatus worker_ProcessRendezvousRequest(const CPacket& packet, const sockaddr_any& addr);
+    EConnectStatus worker_HandlePacket(CUDT& u, RcvUnit& unit, const sockaddr_any& addr, const CPacket*& w_pkt);
+    EConnectStatus worker_HandleListening(CUDT& u, CPacket& packet, const sockaddr_any& addr);
+    void worker_HandleConnected(CUDT& u, RcvUnit& unit, const CPacket*& w_pkt);
     EConnectStatus worker_ProcessAddressedPacket(SRTSOCKET id, CUnit* unit, const sockaddr_any& sa);
     bool worker_TryAcceptedSocket(const CPacket& packet, const sockaddr_any& addr);
 
