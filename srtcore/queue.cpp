@@ -1545,14 +1545,13 @@ EConnectStatus CRcvQueue::worker_HandlePacket(CUDT& u, RcvUnit& unit, const sock
     if (!packet.isControl())
         return worker_HandleData(u, unit, (w_pkt));
 
-    // Control packet payload:
-    // - must be aligned to int32_t
-    // - cannot be 0 (msgs with no args use 4-byte zero-filled padding).
+    // Control packet payload must be aligned to int32_t. A minimum size, if
+    // any, is checked by the processing function of each packet type.
     const size_t pktlen = packet.getLength();
-    if (!pktlen || pktlen % sizeof(int32_t) != 0)
+    if (pktlen % sizeof(int32_t) != 0)
     {
         LOGC(inlog.Error, log << u.CONID() << "EPE: incoming UMSG: " << packet.getType() << " INVALID SIZE: " << pktlen
-                << " (expected > 0 and aligned to " << sizeof(int32_t) << " bytes)");
+                << " (expected aligned to " << sizeof(int32_t) << " bytes)");
         return CONN_AGAIN;
     }
 
