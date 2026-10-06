@@ -945,10 +945,6 @@ private:
 
 public:
 
-    // CAREFUL with this function. This will close the channel
-    // regardless if it's in use.
-    bool tryCloseIfEmpty();
-
     CChannel* channel() { return m_pChannel; }
     const CChannel* channel() const { return m_pChannel; }
     int id() const { return m_iID; }
@@ -989,6 +985,15 @@ public:
     // under restored m_GlobControlLock.
     bool reserveDisposal();
 
+    // [[using locked(CUDTUnited::m_GlobControlLock)]]
+    bool isDisposalReserved() const { return m_ReservedDisposal != sync::CThread::id(); }
+
+    /// Called by the receiver worker after it has deleted the last socket of
+    /// this multiplexer and reserved its disposal: stop the sender worker,
+    /// detach the receiver worker and delete this multiplexer (closing the
+    /// channel). Nothing of this multiplexer can be accessed after this call.
+    void disposeFromWorker();
+
     // For testing
     std::string testAllSocketsClear();
 
@@ -1001,7 +1006,8 @@ public:
     /// Delete the sockets scheduled by scheduleDelete(). A socket that can't
     /// be deleted yet (busy or lingering) is kept for the next call.
     /// Must be called from the receiver worker thread only.
-    void processDeleteQueue();
+    /// Returns true if at least one socket has been deleted.
+    bool processDeleteQueue();
 
     /// Collect the IDs of all sockets of this multiplexer if they are all
     /// closed (SSS_CLOSED). Returns false (and leaves w_ids empty) if any is not.

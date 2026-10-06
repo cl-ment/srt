@@ -412,6 +412,10 @@ public:
     /// @throws std::system_error if an error occurs
     void join();
 
+    /// Separates the thread of execution from this object; the thread
+    /// continues independently and this object is no longer joinable.
+    void detach();
+
 public: // Internal
     /// Calls pthread_create, throws exception on failure.
     /// @throw CThreadException

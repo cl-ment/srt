@@ -612,7 +612,21 @@ private:
 
 private:
     SRT_TSA_GUARDED_BY(m_GlobControlLock)
-    std::map<int, CMultiplexer> m_mMultiplexer; // UDP multiplexer
+    std::map<int, CMultiplexer*> m_mMultiplexer; // UDP multiplexer
+
+    // Multiplexers removed from m_mMultiplexer and being deleted by their
+    // own receiver worker (detached thread).
+    sync::atomic<int> m_iDisposingMuxers;
+
+    // [[using locked(m_GlobControlLock)]]
+    void disposeMuxer_LOCKED(CMultiplexer* mux);
+
+public:
+    /// Called by the receiver worker of an empty multiplexer. If the disposal
+    /// could be reserved, the multiplexer is removed from m_mMultiplexer and
+    /// the worker must call CMultiplexer::disposeFromWorker().
+    bool reserveMuxerDisposalFromWorker(CMultiplexer* mux);
+private:
 
     /// UDT network information cache.
     /// Existence is guarded by m_GlobControlLock, but the cache itself is thread-safe.
@@ -660,7 +674,6 @@ private:
     SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
     CMultiplexer* tryUnbindClosedSocket(const SRTSOCKET u);
     void tryReleaseMuxer(int mid);
-    void removeEmptyMuxers();
 
     CEPoll m_EPoll; // handling epoll data structures and events
 

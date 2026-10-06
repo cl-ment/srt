@@ -444,6 +444,13 @@ void CThread::join()
     return;
 }
 
+void CThread::detach()
+{
+    if (joinable())
+        ::pthread_detach(m_thread);
+    m_thread = ::pthread_t();
+}
+
 void CThread::create(void *(*start_routine) (void *), void *arg)
 {
     const int st = ::pthread_create(&m_thread, NULL, start_routine, arg);

@@ -269,6 +269,7 @@ CUDTUnited::CUDTUnited()
     , m_GlobControlLock()
     , m_IDLock()
     , m_mMultiplexer()
+    , m_iDisposingMuxers(0)
     , m_pCache(new CCache<CInfoBlock>)
     , m_bGCClosing(false)
     , m_GCStopCond()
@@ -405,10 +406,11 @@ void CUDTUnited::cleanupAllSockets()
     }
     m_Groups.clear();
 #endif
-    for (map<int, CMultiplexer>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
+    for (map<int, CMultiplexer*>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
     {
-        CMultiplexer &multiplexer = i->second;
-        multiplexer.resetAtFork();
+        CMultiplexer* multiplexer = i->second;
+        multiplexer->resetAtFork();
+        delete multiplexer;
     }
     m_mMultiplexer.clear();
 }
@@ -509,7 +511,7 @@ void CUDTUnited::closeAllSockets()
         if (remmuxer)
         {
             om << "[";
-            for (map<int, CMultiplexer>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
+            for (map<int, CMultiplexer*>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
                 om << " " << i->first;
             om << " ]";
 
@@ -517,7 +519,8 @@ void CUDTUnited::closeAllSockets()
 #endif
         m_GlobControlLock.unlock();
 
-        if (empty && remmuxer == 0)
+        // Wait also for the multiplexers being deleted by their own workers.
+        if (empty && remmuxer == 0 && m_iDisposingMuxers == 0)
             break;
 
 
@@ -547,6 +550,8 @@ int CUDTUnited::cleanupAtFork()
     setupCond(m_GCStopCond, "GCStop");
     m_iInstanceCount=0;
     m_bGCStatus = false;
+    // The detached workers don't exist in the child process.
+    m_iDisposingMuxers = 0;
     return 0;
 }
 
@@ -739,7 +744,7 @@ void CUDTUnited::swipeSocket_LOCKED(SRTSOCKET id, CUDTSocket* s, CUDTUnited::Swi
     }
 
     // A socket bound to a multiplexer is deleted by its receiver worker.
-    CMultiplexer* mux = map_getp(m_mMultiplexer, s->m_iMuxID);
+    CMultiplexer* mux = locateMultiplexer_LOCKED(s->m_iMuxID);
     if (mux)
         mux->scheduleDelete(id);
 }
@@ -2477,7 +2482,7 @@ SRTSTATUS CUDTUnited::close(const SRTSOCKET u, int reason)
     bool from_worker = false;
     {
         SharedLock cg(m_GlobControlLock);
-        CMultiplexer* mux = map_getp(m_mMultiplexer, k.socket->m_iMuxID);
+        CMultiplexer* mux = locateMultiplexer_LOCKED(k.socket->m_iMuxID);
         from_worker = mux && mux->isSelfDestructAttempt();
     }
 
@@ -3344,7 +3349,8 @@ CUDTSocket* CUDTUnited::locateSocket_LOCKED(SRTSOCKET u, ErrorHandling erh)
 
 CMultiplexer* CUDTUnited::locateMultiplexer_LOCKED(int32_t mid)
 {
-    return map_getp(m_mMultiplexer, mid);
+    map<int, CMultiplexer*>::iterator i = m_mMultiplexer.find(mid);
+    return i == m_mMultiplexer.end() ? NULL : i->second;
 }
 
 #if SRT_ENABLE_BONDING
@@ -3660,39 +3666,17 @@ void CUDTUnited::checkBrokenSockets()
         }
     }
 
-    removeEmptyMuxers();
-
     HLOGC(smlog.Debug, log << "checkBrokenSockets: after removal: m_ClosedSockets.size()=" << m_ClosedSockets.size());
 }
 
-// A multiplexer whose last socket was deleted by its own worker can't be
-// stopped by this worker; it's removed here.
-// [[using locked(m_GlobControlLock)]]
-void CUDTUnited::removeEmptyMuxers()
-{
-    vector<int> empty_mids;
-    for (map<int, CMultiplexer>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
-    {
-        if (i->second.empty())
-            empty_mids.push_back(i->first);
-    }
-
-    // checkRemoveMux() unlocks m_GlobControlLock, so find each one again.
-    for (vector<int>::iterator i = empty_mids.begin(); i != empty_mids.end(); ++i)
-    {
-        CMultiplexer* mux = map_getp(m_mMultiplexer, *i);
-        if (mux && mux->empty())
-            checkRemoveMux(*mux);
-    }
-}
-
-// If all the sockets of the multiplexer are closed, unbind them and delete
-// the multiplexer now, so that its UDP port is released immediately.
-// Otherwise the closed sockets are deleted by the multiplexer's worker.
+// If all the sockets of the multiplexer are closed, stop its workers, then
+// unbind and delete the sockets and delete the multiplexer now, so that its
+// UDP port is released immediately. Otherwise the closed sockets are deleted
+// by the multiplexer's worker, which deletes the multiplexer with the last one.
 // [[using locked(m_GlobControlLock)]]
 void CUDTUnited::tryReleaseMuxer(int mid)
 {
-    CMultiplexer* mux = map_getp(m_mMultiplexer, mid);
+    CMultiplexer* mux = locateMultiplexer_LOCKED(mid);
     if (!mux || mux->isSelfDestructAttempt())
         return;
 
@@ -3700,12 +3684,59 @@ void CUDTUnited::tryReleaseMuxer(int mid)
     if (!mux->collectIfAllClosed((ids)))
         return;
 
-    for (vector<SRTSOCKET>::iterator i = ids.begin(); i != ids.end(); ++i)
-        tryUnbindClosedSocket(*i);
+    if (!mux->reserveDisposal())
+    {
+        HLOGC(smlog.Debug, log << "tryReleaseMuxer: MUXER id=" << mid << " already being disposed");
+        return;
+    }
 
-    // WARNING: checkRemoveMux is like "delete this".
-    if (mux->tryCloseIfEmpty())
-        checkRemoveMux(*mux);
+    // The workers may still use the sockets: stop them first. While
+    // m_GlobControlLock is unlocked, the receiver worker may still delete
+    // some of these sockets.
+    mux->setClosing();
+    if (mux->channel())
+        mux->channel()->stop();
+    CGlobEvent::triggerEvent();
+    m_GlobControlLock.unlock();
+    mux->stopWorkers();
+    m_GlobControlLock.lock();
+
+    for (vector<SRTSOCKET>::iterator i = ids.begin(); i != ids.end(); ++i)
+    {
+        tryUnbindClosedSocket(*i);
+        // Deleted if not busy, otherwise left (unbound) to the GC.
+        tryRemoveClosedSocket(*i);
+    }
+
+    disposeMuxer_LOCKED(mux);
+}
+
+// The workers of the multiplexer must be stopped.
+// [[using locked(m_GlobControlLock)]]
+void CUDTUnited::disposeMuxer_LOCKED(CMultiplexer* mux)
+{
+    const int mid = mux->id();
+    if (!mux->empty())
+        LOGC(smlog.Error, log << "disposeMuxer: IPE: MUXER id=" << mid << " still has " << mux->nsockets() << " sockets");
+
+    HLOGC(smlog.Debug, log << "disposeMuxer: deleting MUXER id=" << mid);
+    m_mMultiplexer.erase(mid);
+    delete mux;
+}
+
+bool CUDTUnited::reserveMuxerDisposalFromWorker(CMultiplexer* mux)
+{
+    ExclusiveLock cg(m_GlobControlLock);
+
+    // A socket could have been bound in the meantime.
+    if (!mux->empty() || !mux->reserveDisposal())
+        return false;
+
+    HLOGC(smlog.Debug, log << "MUXER id=" << mux->id() << " is empty - its worker disposes it");
+    mux->setClosing();
+    m_mMultiplexer.erase(mux->id());
+    ++m_iDisposingMuxers;
+    return true;
 }
 
 // [[using locked(m_GlobControlLock)]]
@@ -3792,8 +3823,7 @@ bool CUDTUnited::deleteClosedSocket(SRTSOCKET u)
 
             HLOGC(smlog.Debug, log << "deleteClosedSocket: @" << u << " - deleting from its multiplexer worker");
 
-            // The multiplexer (if it's empty now) can't be stopped from its own
-            // worker; it's done by removeEmptyMuxers().
+            // If the multiplexer is empty now, the worker disposes it.
             tryRemoveClosedSocket(u);
             return m_ClosedSockets.count(u) == 0;
         }
@@ -3887,7 +3917,7 @@ CMultiplexer* CUDTUnited::tryUnbindClosedSocket(const SRTSOCKET u)
         return NULL;
     }
 
-    CMultiplexer* mux = map_getp(m_mMultiplexer, mid);
+    CMultiplexer* mux = locateMultiplexer_LOCKED(mid);
     if (!mux)
     {
         LOGC(smlog.Fatal, log << "IPE: MUXER id=" << mid << " NOT FOUND!");
@@ -4008,7 +4038,7 @@ CMultiplexer* CUDTUnited::tryRemoveClosedSocket(const SRTSOCKET u)
     }
     else
     {
-        mux = map_getp(m_mMultiplexer, mid);
+        mux = locateMultiplexer_LOCKED(mid);
         if (!mux)
         {
             LOGC(smlog.Fatal, log << "IPE: MUXER id=" << mid << " NOT FOUND!");
@@ -4055,7 +4085,7 @@ CMultiplexer* CUDTUnited::tryRemoveClosedSocket(const SRTSOCKET u)
 // [[using locked(m_GlobControlLock)]]
 void CUDTUnited::checkRemoveMux(CMultiplexer& mx)
 {
-    const int mid = mx.id();
+    IF_HEAVY_LOGGING(const int mid = mx.id());
     HLOGC(smlog.Debug, log << "checkRemoveMux: unrefing muxer " << mid << ", with " << mx.nsockets() << " sockets");
     if (mx.empty())
     {
@@ -4086,7 +4116,7 @@ void CUDTUnited::checkRemoveMux(CMultiplexer& mx)
             // that the privilege of deleting this multiplexer is still
             // on this thread.
             HLOGC(smlog.Debug, log << "... Muxer destroyed, removing");
-            m_mMultiplexer.erase(mid);
+            disposeMuxer_LOCKED(&mx);
         }
         else
         {
@@ -4219,33 +4249,33 @@ void CUDTUnited::updateMux(CUDTSocket* s, const sockaddr_any& reqaddr, const SYS
     // a new multiplexer is needed
     int muxid = (int32_t)s->id();
 
+    // Should be impossible, but must be prevented.
+    if (m_mMultiplexer.count(muxid))
+    {
+        LOGC(smlog.Error, log << "IPE: Trying to add multiplexer with id=" << muxid << " which is already busy");
+        throw CUDTException(MJ_NOTSUP, MN_ISBOUND);
+    }
+
+    CMultiplexer* m = new CMultiplexer;
+    m_mMultiplexer[muxid] = m;
     try
     {
-        std::pair<CMultiplexer&, bool> is = map_tryinsert(m_mMultiplexer, muxid);
-
-        // Should be impossible, but must be prevented.
-        // NOTE: map::insert with a pair simply ignores the passed value,
-        // if the key is already found.
-        if (!is.second)
-        {
-            LOGC(smlog.Error, log << "IPE: Trying to add multiplexer with id=" << muxid << " which is already busy");
-            throw CUDTException(MJ_NOTSUP, MN_ISBOUND);
-        }
-        CMultiplexer& m = is.first;
-        m.configure(int32_t(s->id()), s->core().m_config, reqaddr, udpsock);
-        installMuxer((s), (&m));
+        m->configure(int32_t(s->id()), s->core().m_config, reqaddr, udpsock);
+        installMuxer((s), (m));
     }
     catch (const CUDTException& x)
     {
         HLOGC(smlog.Debug, log << "installMuxer: FAILED; removing multiplexer: ERROR #" << x.getErrorCode()
                 << ": " << x.getErrorMessage() << ": errno=" << x.getErrno() << ": " << hvu::sys_strerror(x.getErrno()));
         m_mMultiplexer.erase(muxid);
+        delete m;
         throw;
     }
     catch (...)
     {
         HLOGC(smlog.Debug, log << "installMuxer: FAILED; removing multiplexer (IPE: UNKNOWN EXCEPTION)");
         m_mMultiplexer.erase(muxid);
+        delete m;
         throw CUDTException(MJ_SYSTEMRES, MN_MEMORY, 0);
     }
 
@@ -4274,9 +4304,13 @@ CMultiplexer* CUDTUnited::findSuitableMuxer(CUDTSocket* s, const sockaddr_any& r
     // PASS: use 'continue' to pass to the next element.
 
     bool reuse_attempt = false;
-    for (map<int, CMultiplexer>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
+    for (map<int, CMultiplexer*>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
     {
-        CMultiplexer const& m = i->second;
+        CMultiplexer const& m = *i->second;
+
+        // Being disposed: its port is going to be released.
+        if (m.isDisposalReserved())
+            continue;
 
         sockaddr_any mux_addr = m.selfAddr();
 
@@ -4455,7 +4489,7 @@ CMultiplexer* CUDTUnited::findSuitableMuxer(CUDTSocket* s, const sockaddr_any& r
             if (channelSettingsMatch(m.cfg(), cfgSocket)
                     && inet6SettingsCompat(mux_addr, m.cfg(), reqaddr, cfgSocket))
             {
-                return &i->second;
+                return i->second;
             }
             //   - if not, it's a conflict
             LOGC(smlog.Error,
@@ -4496,7 +4530,9 @@ bool CUDTUnited::updateListenerMux(CUDTSocket* s, const CUDTSocket* ls)
     // First thing that should be certain here is that there should exist
     // a muxer with the ID written in the listener socket's mux ID.
 
-    CMultiplexer* mux = map_getp(m_mMultiplexer, ls->m_iMuxID);
+    CMultiplexer* mux = locateMultiplexer_LOCKED(ls->m_iMuxID);
+    if (mux && mux->isDisposalReserved())
+        mux = NULL;
 
     // NOTE:
     // THIS BELOW CODE is only for a highly unlikely situation when the listener
@@ -4515,9 +4551,11 @@ bool CUDTUnited::updateListenerMux(CUDTSocket* s, const CUDTSocket* ls)
         // To be used as first found with different IP version
 
         // find the listener's address
-        for (map<int, CMultiplexer>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
+        for (map<int, CMultiplexer*>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
         {
-            CMultiplexer& m = i->second;
+            CMultiplexer& m = *i->second;
+            if (m.isDisposalReserved())
+                continue;
 
 #if HVU_ENABLE_HEAVY_LOGGING
             hvu::ofmt_bufs that_muxer;
@@ -5673,14 +5711,14 @@ string CUDTUnited::testSocketsClear()
 
     // The multiplexer should be empty, but even if it isn't by some reason
     // (some sockets were not yet wiped out by gc), it should contain empty its own containers.
-    for (std::map<int, CMultiplexer>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
+    for (std::map<int, CMultiplexer*>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
     {
-        std::string remain = i->second.testAllSocketsClear();
+        std::string remain = i->second->testAllSocketsClear();
         if (!remain.empty())
             out << " *" << remain << "*";
 
-        if (!i->second.empty())
-            out << " ^DANG^" << i->second.id() << "^";
+        if (!i->second->empty())
+            out << " ^DANG^" << i->second->id() << "^";
     }
 
     for (sockets_t::iterator i = m_Sockets.begin(); i != m_Sockets.end(); ++i)

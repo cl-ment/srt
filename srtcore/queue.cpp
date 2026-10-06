@@ -1376,11 +1376,18 @@ void CRcvQueue::worker() ATR_NOEXCEPT
     ThreadName::get(thname);
     THREAD_STATE_INIT(thname.c_str());
 
+    bool dispose = false;
     while (!m_bClosing)
     {
         // Delete the sockets closed during the previous iterations. No raw
         // pointer obtained in an iteration survives to the next one.
-        m_parent->processDeleteQueue();
+        // If the last socket has been deleted, the multiplexer is disposed.
+        if (m_parent->processDeleteQueue() && m_parent->empty()
+                && CUDT::uglobal().reserveMuxerDisposalFromWorker(m_parent))
+        {
+            dispose = true;
+            break;
+        }
 
         // NOTE: `pkt` points to a packet inside a unit that was used to read the packet.
         // It's provided (not NULL) only if it was read and it was a control packet.
@@ -1458,6 +1465,10 @@ void CRcvQueue::worker() ATR_NOEXCEPT
     HLOGC(qrlog.Debug, log << "worker: EXIT");
 
     THREAD_EXIT();
+
+    // WARNING: this deletes `this`.
+    if (dispose)
+        m_parent->disposeFromWorker();
 }
 
 EReadStatus CRcvQueue::worker_DropIncomingPacket()
@@ -2393,10 +2404,10 @@ void CMultiplexer::scheduleDelete(SRTSOCKET id)
     HLOGC(qmlog.Debug, log << "MUXER id=" << m_iID << ": @" << id << " scheduled for deletion");
 }
 
-void CMultiplexer::processDeleteQueue()
+bool CMultiplexer::processDeleteQueue()
 {
     if (m_bDeleteQueueEmpty)
-        return;
+        return false;
 
     vector<SRTSOCKET> ids;
     {
@@ -2418,6 +2429,22 @@ void CMultiplexer::processDeleteQueue()
         m_DeleteQueue.insert(m_DeleteQueue.end(), remaining.begin(), remaining.end());
         m_bDeleteQueueEmpty = false;
     }
+    return remaining.size() < ids.size();
+}
+
+void CMultiplexer::disposeFromWorker()
+{
+    SRT_ASSERT(sync::this_thread_is(m_RcvQueue.m_WorkerThread));
+    HLOGC(qmlog.Debug, log << "MUXER id=" << m_iID << ": last socket deleted, the worker disposes the multiplexer");
+
+    if (m_pChannel)
+        m_pChannel->stop();
+    m_SndQueue.stop();
+    m_RcvQueue.m_WorkerThread.detach();
+
+    CUDTUnited& glob = CUDT::uglobal();
+    delete this;
+    --glob.m_iDisposingMuxers;
 }
 
 bool CMultiplexer::collectIfAllClosed(vector<SRTSOCKET>& w_ids)
@@ -2433,26 +2460,6 @@ bool CMultiplexer::collectIfAllClosed(vector<SRTSOCKET>& w_ids)
         }
         w_ids.push_back(i->m_pSocket->id());
     }
-    return true;
-}
-
-bool CMultiplexer::tryCloseIfEmpty()
-{
-    if (!empty())
-        return false;
-
-    // Only set the closing flags because without this the worker loops
-    // will report errors, but continue their work. Setting this flag will
-    // make the threads exit in perspective, but at least they won't treat
-    // the reading failure as IPE. The thread exiting will be still ensured
-    // after this call.
-    setClosing();
-
-    if (m_pChannel)
-        m_pChannel->stop();
-
-    // CONSIDER - but this field is inter-thread with no mutex
-    // m_SelfAddr.reset();
     return true;
 }
 
