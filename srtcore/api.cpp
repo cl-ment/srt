@@ -2790,6 +2790,21 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
         // very socket is used, this shall not block the central database.
         s->closeInternal(reason);
 
+        // Asynchronous linger: closeBasic() has set the expiration time and
+        // returned without closing. The socket goes on with sending its data in
+        // SSS_CLOSING; the worker of its multiplexer closes it when all of them
+        // are acknowledged or the linger expires.
+        const bool lingering = !is_zero(e.m_tsLingerExpiration)
+            && e.changeState(CUDT::SSS_CONNECTED, CUDT::SSS_CLOSING);
+        if (lingering)
+        {
+            HLOGC(smlog.Debug, log << "@" << u << " U::close: lingering until "
+                    << FormatTime(e.m_tsLingerExpiration));
+            e.setAgentCloseReason(reason);
+            // Wake up the threads blocked on this socket.
+            e.releaseSynch();
+        }
+
         // synchronize with garbage collection.
         HLOGC(smlog.Debug,
               log << "@" << u << "U::close done. GLOBAL CLOSE: " << s->core().CONID()
@@ -2806,7 +2821,7 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
         // from the container, though it would be more efficient.
         // FURTHER RESEARCH REQUIRED.
         sockets_t::iterator i = m_Sockets.find(u);
-        if ((i == m_Sockets.end()) || !i->second->setClosed())
+        if ((i == m_Sockets.end()) || (!lingering && !i->second->setClosed()))
         {
             HLOGC(smlog.Debug, log << "@" << u << "U::close: NOT AN ACTIVE SOCKET, returning.");
             return SRT_STATUS_OK;
@@ -3648,26 +3663,6 @@ void CUDTUnited::checkBrokenSockets()
             continue;
         }
 
-        CUDT& u = ps->core();
-
-        // HLOGC(smlog.Debug, log << "checking CLOSED socket: " << j->first);
-        if (!is_zero(u.m_tsLingerExpiration))
-        {
-            // asynchronous close:
-            if ((!u.m_pSndBuffer) || (0 == u.m_pSndBuffer->getCurrBufSize()) ||
-                (u.m_tsLingerExpiration <= steady_clock::now()))
-            {
-                HLOGC(smlog.Debug, log << "checkBrokenSockets: marking CLOSED linger-expired @" << ps->id());
-                u.m_tsLingerExpiration = steady_clock::time_point();
-                // TO_REMOVE u.m_bClosing           = true;
-                // The socket is already SSS_CLOSED here (terminal state).
-                ps->m_tsClosureTimeStamp        = steady_clock::now();
-            }
-            else
-            {
-                HLOGC(smlog.Debug, log << "checkBrokenSockets: linger; remains @" << ps->id());
-            }
-        }
 
         // timeout 1 second to destroy a socket AND it has been removed from
         // RcvUList. During a forced (full library) shutdown there's no point
@@ -3752,34 +3747,52 @@ void CUDTUnited::tryReleaseMuxer(int mid)
 
 bool CUDTUnited::deleteClosedSocket(SRTSOCKET u)
 {
-    ExclusiveLock cg(m_GlobControlLock);
-
-    sockets_t::iterator i = m_ClosedSockets.find(u);
-    if (i == m_ClosedSockets.end())
-        return true; // already deleted
-
-    CUDTSocket* s = i->second;
-    CUDT& c = s->core();
-
-    // Asynchronous linger: keep the socket until its sender buffer is empty
-    // or the linger time has expired.
-    if (!is_zero(c.m_tsLingerExpiration))
+    CUDTSocket* s = NULL;
     {
-        if (c.m_pSndBuffer && c.m_pSndBuffer->getCurrBufSize() > 0
+        ExclusiveLock cg(m_GlobControlLock);
+
+        sockets_t::iterator i = m_ClosedSockets.find(u);
+        if (i == m_ClosedSockets.end())
+            return true; // already deleted
+
+        s = i->second;
+        CUDT& c = s->core();
+
+        if (c.m_State == CUDT::SSS_CLOSED)
+        {
+            if (s->isStillBusy())
+                return false;
+
+            HLOGC(smlog.Debug, log << "deleteClosedSocket: @" << u << " - deleting from its multiplexer worker");
+
+            // The multiplexer (if it's empty now) can't be stopped from its own
+            // worker; it's done by removeEmptyMuxers().
+            tryRemoveClosedSocket(u);
+            return m_ClosedSockets.count(u) == 0;
+        }
+
+        // Asynchronous linger (SSS_CLOSING): wait until all data are
+        // acknowledged (the sender buffer is empty) or the linger expires.
+        // If the connection has broken in the meantime, close it now.
+        if (c.m_State == CUDT::SSS_CLOSING && c.m_pSndBuffer && c.m_pSndBuffer->getCurrBufSize() > 0
                 && c.m_tsLingerExpiration > steady_clock::now())
             return false;
-        c.m_tsLingerExpiration = steady_clock::time_point();
+
+        // Keep it while m_GlobControlLock is unlocked: closeEntity() locks
+        // m_ConnectionLock, which is ordered before m_GlobControlLock.
+        s->apiAcquire();
     }
 
-    if (s->isStillBusy())
-        return false;
+    HLOGC(smlog.Debug, log << "deleteClosedSocket: @" << u << " linger over, state="
+            << CUDT::stateStr(s->core().m_State) << " - closing");
+    s->core().m_tsLingerExpiration = steady_clock::time_point();
+    s->closeInternal(SRT_CLS_UNKNOWN);
 
-    HLOGC(smlog.Debug, log << "deleteClosedSocket: @" << u << " - deleting from its multiplexer worker");
-
-    // The multiplexer (if it's empty now) can't be stopped from its own
-    // worker; it's done by removeEmptyMuxers().
-    tryRemoveClosedSocket(u);
-    return m_ClosedSockets.count(u) == 0;
+    ExclusiveLock cg(m_GlobControlLock);
+    s->apiRelease();
+    s->setClosed();
+    // Deleted at the next iteration of the worker.
+    return false;
 }
 
 // [[using locked(m_GlobControlLock)]]

@@ -757,7 +757,7 @@ void CSndQueue::workerSendOrder()
 #endif
 
             // TO_REMOVE if (!u.m_bConnected || u.m_bBroken || u.m_bClosing)
-            if (u.m_State != CUDT::SSS_CONNECTED)
+            if (!u.isTransmitting())
             {
                 HLOGC(qslog.Debug, log << "Socket to be processed is already broken, not packing");
                 m_SendOrderList.remove(runner); // [TSA] IDEM
@@ -1506,7 +1506,7 @@ static EConnectStatus rcv_AcquireTargetSocket(CMultiplexer* parent, SRTSOCKET id
     // Note that here we are out of any locks, so m_GlobControlLock can be locked.
 
     CUDT& u = s->core();
-    if (!u.stillConnected())
+    if (!u.isTransmitting())
     {
         // Socket will be released in this block.
         SocketKeeper sk = CUDT::keep_noacquire(s); // Acquired by findAgent() call
@@ -1665,7 +1665,7 @@ void CRcvQueue::worker_ProcessUnit(RcvUnit& unit, EConnectStatus& w_cst, const C
         }
 
         // TO_REMOVE if (u->m_bBroken || u->m_bClosing)
-        if (u->m_State == CUDT::SSS_BROKEN || u->m_State == CUDT::SSS_CLOSING || u->m_State == CUDT::SSS_CLOSED)
+        if (!u->isTransmitting())
         {
             // If these flags are set, the socket is no longer eligible for any
             // updates, and they no longer are consistent as "former" group members.
@@ -2343,7 +2343,7 @@ void CMultiplexer::rollUpdateSockets(const sync::steady_clock::time_point& curti
             CUDT* u = &point->m_pSocket->core();
 
             // TO_REMOVE if (u->m_bConnected && !u->m_bBroken && !u->m_bClosing)
-            if (u->m_State == CUDT::SSS_CONNECTED)
+            if (u->isTransmitting())
             {
                 // Lock the sockets being collected here to prevent unexpected deletion
                 // SYMMETRY is ensured by adding them to this container.

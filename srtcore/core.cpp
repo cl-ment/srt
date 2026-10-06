@@ -5834,7 +5834,9 @@ bool srt::CUDT::closeBasic(int reason) ATR_NOEXCEPT
         HLOGC(smlog.Debug, log << CONID() << "... (linger)");
 // TO_REMOVE        while (!m_bBroken && m_bConnected && (m_pSndBuffer->getCurrBufSize() > 0) &&
 // TO_REMOVE               (steady_clock::now() - entertime < seconds_from(m_config.Linger.l_linger)))
-        while ((m_State == CUDT::SSS_CONNECTED || m_State == CUDT::SSS_CLOSING) && m_pSndBuffer &&
+        // Only srt_close() lingers. A socket in SSS_CLOSING is closed by the
+        // worker of its multiplexer when the linger is over.
+        while (m_State == CUDT::SSS_CONNECTED && m_pSndBuffer &&
                (m_pSndBuffer->getCurrBufSize() > 0) &&
                (steady_clock::now() - entertime < seconds_from(m_config.Linger.l_linger)))
         {
@@ -5844,7 +5846,9 @@ bool srt::CUDT::closeBasic(int reason) ATR_NOEXCEPT
 
             if (!m_config.bSynSending)
             {
-                // if this socket enables asynchronous sending, return immediately and let GC to close it later
+                // if this socket enables asynchronous sending, return immediately; the socket goes
+                // to SSS_CLOSING and is closed by the worker of its multiplexer when all data are
+                // acknowledged or the linger expires.
                 if (is_zero(m_tsLingerExpiration))
                     m_tsLingerExpiration = entertime + seconds_from(m_config.Linger.l_linger);
 
@@ -5876,7 +5880,7 @@ bool srt::CUDT::closeBasic(int reason) ATR_NOEXCEPT
 
     // remove this socket from the snd queue
     // TO_REMOVE if (m_bConnected)
-    if (m_State == CUDT::SSS_CONNECTED)
+    if (isTransmitting())
     {
         HLOGC(smlog.Debug, log << CONID() << "CLOSING: Remove from sender queue");
         m_pMuxer->removeSender(this);
@@ -10160,7 +10164,7 @@ void CUDT::processClose()
     m_bClosing       = true;
     m_bBroken        = true;
 #endif 
-    setState(CUDT::SSS_CLOSING);
+    setState(CUDT::SSS_BROKEN);
     m_iBrokenCounter = 60;
 
     HLOGP(smlog.Debug, "processClose: (closing=true) sent message and set flags");

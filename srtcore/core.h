@@ -718,6 +718,11 @@ public: // internal API
     /// may still hold data to extract and a stream-mode reader must still
     /// be able to reach the EOF report. Replaces the former m_bConnected.
     bool isClosingOrClosed() const { const SRTSocketState st = m_State; return st == SSS_CLOSING || st == SSS_CLOSED; }
+    // CONNECTED, or CLOSING while the data still in the sender buffer are
+    // being delivered (asynchronous linger): the transmission goes on.
+    bool isTransmitting() const { const SRTSocketState st = m_State; return st == SSS_CONNECTED || st == SSS_CLOSING; }
+    // Change the state only if it's currently `from`.
+    bool changeState(SRTSocketState from, SRTSocketState to) { return m_State.compare_exchange(from, to); }
     bool wasConnected()
     {
         return m_State == CUDT::SSS_CONNECTED
