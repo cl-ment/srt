@@ -244,8 +244,6 @@ public:
     void setBrokenManaged();
     void removeFromGroup(bool broken);
 
-    void breakNonAcceptedSockets();
-
     // Instrumentally used by select() and also required for non-blocking
     // mode check in groups
     bool readReady() const;
@@ -684,6 +682,8 @@ private:
 
     SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
     void closeLeakyAcceptSockets(CUDTSocket* s);
+    void closeNonAcceptedSockets(CUDTSocket* ls);
+    void retireBrokenSocket_LOCKED(SRTSOCKET u);
 
 public:
     SRTSTATUS getCloseReason(const SRTSOCKET u, SRT_CLOSE_INFO& info);

@@ -179,7 +179,6 @@ void CUDTSocket::breakSocket_LOCKED(int reason)
     // SET THIS to true because this function is called always for a socket
     // that will never have any chance in the future to be manually closed.
     m_UDT.m_bManaged       = true;
-    m_UDT.m_iBrokenCounter = 0;
     HLOGC(smlog.Debug, log << "@" << m_UDT.m_SocketID << " CLOSING AS SOCKET");
     m_UDT.closeEntity(reason);
 }
@@ -199,9 +198,9 @@ bool CUDTSocket::setClosed()
 
 void CUDTSocket::setBrokenManaged()
 {
-    m_UDT.m_iBrokenCounter = 60;
     m_UDT.m_bManaged = true;
     m_UDT.setState(CUDT::SSS_BROKEN);
+    m_UDT.scheduleRetireIfManaged();
 }
 
 bool CUDTSocket::readReady() const
@@ -2593,52 +2592,26 @@ void CUDTUnited::recordCloseReason(CUDTSocket* s)
 
 bool CUDTSocket::closeInternal(int reason) ATR_NOEXCEPT
 {
-    bool done = m_UDT.closeEntity(reason);
-    breakNonAcceptedSockets(); // XXX necessary?
-
-    return done;
+    return m_UDT.closeEntity(reason);
 }
 
-void CUDTSocket::breakNonAcceptedSockets()
+// Close the sockets of the listener that have not been accepted, as if
+// srt_close() was called for them. srt_accept() can no longer get them.
+void CUDTUnited::closeNonAcceptedSockets(CUDTSocket* ls)
 {
-    // In case of a listener socket, close also all incoming connection
-    // sockets that have not been extracted as accepted.
-
-    vector<SRTSOCKET> accepted;
-    if (m_UDT.m_State == CUDT::SSS_LISTENING)
+    map<SRTSOCKET, sockaddr_any> queued;
     {
-        HLOGC(smlog.Debug, log << "breakNonAcceptedSockets: @" << m_UDT.id() << " CHECKING ACCEPTED LEAKS:");
-        ScopedLock lk (m_AcceptLock);
-
-        for (map<SRTSOCKET, sockaddr_any>::iterator q = m_QueuedSockets.begin();
-                q != m_QueuedSockets.end(); ++ q)
-        {
-            accepted.push_back(q->first);
-        }
+        ScopedLock lk(ls->m_AcceptLock);
+        swap(queued, ls->m_QueuedSockets);
     }
 
-    if (!accepted.empty())
+    for (map<SRTSOCKET, sockaddr_any>::iterator q = queued.begin(); q != queued.end(); ++q)
     {
-        HLOGC(smlog.Debug, log << "breakNonAcceptedSockets: found " << accepted.size() << " leaky accepted sockets");
-        for (vector<SRTSOCKET>::iterator i = accepted.begin(); i != accepted.end(); ++i)
-        {
-            SocketKeeper sk = SOCKET_KEEP(*i, ERH_RETURN);
-            if (sk.socket)
-            {
-#ifdef TO_REMOVE
-                sk.socket->m_UDT.m_bBroken = true;
-                sk.socket->m_UDT.m_bClosing = true;
-#endif
-                // TODO verify it looks like it's better to make it SSS_CLOSING than SSS_BROKEN
-
-                sk.socket->m_UDT.setState(CUDT::SSS_CLOSING);
-                sk.socket->m_UDT.m_iBrokenCounter = 0;
-            }
-        }
-    }
-    else
-    {
-        HLOGC(smlog.Debug, log << "breakNonAcceptedSockets: no queued sockets");
+        SocketKeeper sk = SOCKET_KEEP(q->first, ERH_RETURN);
+        if (!sk.socket)
+            continue;
+        HLOGC(smlog.Debug, log << "@" << ls->id() << " closing non-accepted socket @" << q->first);
+        close(sk.socket, SRT_CLS_DEADLSN, NULL);
     }
 }
 
@@ -2739,7 +2712,6 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
         // is currently occupying (due to blocked slot in the RcvQueue).
 
         HLOGC(smlog.Debug, log << s->core().CONID() << "CLOSING (removing listener immediately)");
-        s->breakNonAcceptedSockets();
 
         // Withdraw this socket from the multiplexer's listener slot. Without
         // this, the receiver queue keeps routing incoming connection requests
@@ -2747,6 +2719,10 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
         // newConnection()), and a new socket binding the same port fails
         // srt_listen() with MN_BUSY because the slot is still taken.
         s->core().notListening();
+
+        // Before closing the listener, so that its multiplexer can be
+        // released below if they were its only other users.
+        closeNonAcceptedSockets(s);
 
         // Remove the listener from all EIDs and wake up the threads blocked in epoll.
         m_EPoll.wipe_usock(s->id(), s->core().m_sPollID);
@@ -3527,6 +3503,10 @@ void CUDTUnited::checkBrokenSockets()
                 continue;
             }
 
+            // A socket bound to a multiplexer is retired by its receiver worker.
+            if (s->m_iMuxID != -1)
+                continue;
+
             HLOGC(cnlog.Debug, log << "Socket @" << s->id() << " considered wiped: managed=" <<
                     c.m_bManaged << " state=" << c.m_State);
         }
@@ -3558,26 +3538,9 @@ void CUDTUnited::checkBrokenSockets()
         {
             CUDT& u = s->core();
 
-            // For decent closing, just keep it as long as it still
-            // has data in the buffer.
-            if (!forced_closing)
-            {
-                u.m_RcvBufferLock.lock();
-                bool has_avail_packets = u.m_pRcvBuffer && u.m_pRcvBuffer->hasAvailablePackets();
-                u.m_RcvBufferLock.unlock();
-
-                if (has_avail_packets)
-                {
-                    const int bc = u.m_iBrokenCounter.load();
-                    if (bc > 0)
-                    {
-                        // if there is still data in the receiver buffer, wait longer
-                        s->core().m_iBrokenCounter.store(bc - 1);
-                        continue;
-                    }
-                }
-            }
-            else
+            // A managed socket has no reader: no need to wait for the
+            // received data to be read.
+            if (forced_closing)
             {
                 // Forced closing: any data still in the buffer - delete them.
                 ScopedLock cgb (u.m_RcvBufferLock);
@@ -3745,6 +3708,66 @@ void CUDTUnited::tryReleaseMuxer(int mid)
         checkRemoveMux(*mux);
 }
 
+// [[using locked(m_GlobControlLock)]]
+void CUDTUnited::retireBrokenSocket_LOCKED(SRTSOCKET u)
+{
+    sockets_t::iterator i = m_Sockets.find(u);
+    if (i == m_Sockets.end())
+        return;
+
+    CUDTSocket* s = i->second;
+    CUDT& c = s->core();
+    if (c.m_State != CUDT::SSS_BROKEN || !c.m_bManaged)
+        return;
+
+#if SRT_ENABLE_BONDING
+    if (s->m_GroupOf)
+    {
+        HLOGC(smlog.Debug,
+             log << "@" << u << " IS MEMBER OF $" << s->m_GroupOf->id() << " - REMOVING FROM GROUP");
+        s->removeFromGroup(true);
+    }
+#endif
+
+    // Note that this will not override the value that has been already
+    // set by some other functionality, only set it when not yet set.
+    c.setAgentCloseReason(SRT_CLS_INTERNAL);
+    recordCloseReason(s);
+
+    if (!s->setClosed())
+    {
+        // A socket in m_Sockets is never CLOSED: the thread that closes it
+        // also retires it, under m_GlobControlLock.
+        LOGC(smlog.Error, log << "retireBrokenSocket: IPE: @" << u << " already CLOSED in m_Sockets");
+        return;
+    }
+
+    HLOGC(smlog.Debug, log << "retireBrokenSocket: @" << u << " broken and managed - CLOSED");
+
+    if (s->m_ListenSocket != SRT_SOCKID_CONNREQ)
+    {
+        // remove from listener's queue
+        sockets_t::iterator ls = m_Sockets.find(s->m_ListenSocket);
+        CUDTSocket* lsp = NULL;
+        if (ls != m_Sockets.end())
+            lsp = ls->second;
+        else
+        {
+            ls = m_ClosedSockets.find(s->m_ListenSocket);
+            if (ls != m_ClosedSockets.end())
+                lsp = ls->second;
+        }
+        if (lsp)
+        {
+            ScopedLock lk(lsp->m_AcceptLock);
+            lsp->m_QueuedSockets.erase(u);
+        }
+    }
+
+    m_EPoll.wipe_usock(u, c.m_sPollID);
+    swipeSocket_LOCKED(u, s, SWIPE_NOW);
+}
+
 bool CUDTUnited::deleteClosedSocket(SRTSOCKET u)
 {
     CUDTSocket* s = NULL;
@@ -3753,7 +3776,11 @@ bool CUDTUnited::deleteClosedSocket(SRTSOCKET u)
 
         sockets_t::iterator i = m_ClosedSockets.find(u);
         if (i == m_ClosedSockets.end())
-            return true; // already deleted
+        {
+            // Not closed: a broken managed socket to retire, or already deleted.
+            retireBrokenSocket_LOCKED(u);
+            return true;
+        }
 
         s = i->second;
         CUDT& c = s->core();

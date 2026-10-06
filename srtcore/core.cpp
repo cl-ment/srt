@@ -439,7 +439,6 @@ void CUDT::construct()
     m_bBreakAsUnstable    = false;
     m_bShutdown           = false;
 #endif
-    // TODO: m_iBrokenCounter should be still set to some default.
     m_bPeerHealth         = true;
     m_RejectReason        = SRT_REJ_UNKNOWN;
     m_tsLastReqTime.store(steady_clock::time_point());
@@ -8448,7 +8447,6 @@ bool CUDT::processCtrlAck(const CPacket &ctrlpkt, const steady_clock::time_point
         LOGC(inlog.Error, log << "ACK: IPE/EPE: %" << ackdata_seqno << " considered rogue. BREAKING.");
         // TO_REMOVE m_bBroken        = true;
         // TODO We should just ignore it 
-        m_iBrokenCounter = 0;
         return false;
     }
 
@@ -8515,7 +8513,6 @@ bool CUDT::processCtrlAck(const CPacket &ctrlpkt, const steady_clock::time_point
                     << last_sent_seqno << " by " << (CSeqNo::seqoff(last_sent_seqno, ackdata_seqno) - 1) << "! - BREAKING");
             // TO_REMOVE m_bBroken        = true;
             setState(CUDT::SSS_BROKEN);
-            m_iBrokenCounter = 0;
             setAgentCloseReason(SRT_CLS_IPE);
 
             updateBrokenConnection();
@@ -8956,7 +8953,6 @@ bool CUDT::processCtrlLossReport(const CPacket& ctrlpkt)
         // this should not happen: attack or bug
         // TO_REMOVE m_bBroken = true;
         setState(CUDT::SSS_BROKEN);
-        m_iBrokenCounter = 0;
         setAgentCloseReason(SRT_CLS_ROGUE);
 
         updateBrokenConnection();
@@ -9213,7 +9209,6 @@ bool CUDT::processCtrlShutdown(int reason)
     }
 
     setState(CUDT::SSS_SHUTDOWN);
-    m_iBrokenCounter = 60;
 
     // This does the same as it would happen on connection timeout,
     // just we know about this state prematurely thanks to this message.
@@ -10165,7 +10160,7 @@ void CUDT::processClose()
     m_bBroken        = true;
 #endif 
     setState(CUDT::SSS_BROKEN);
-    m_iBrokenCounter = 60;
+    scheduleRetireIfManaged();
 
     HLOGP(smlog.Debug, "processClose: (closing=true) sent message and set flags");
 
@@ -13151,7 +13146,6 @@ bool CUDT::checkExpTimer(const steady_clock::time_point& currtime, int check_rea
         m_bBroken        = true;
 #endif 
         setState(CUDT::SSS_BROKEN);
-        m_iBrokenCounter = 30;
 
         // update snd U list to remove this socket
         m_pMuxer->updateSendFast(m_parent);
@@ -13280,6 +13274,17 @@ void CUDT::updateBrokenConnection()
     releaseSynch();
     uglobal().m_EPoll.update_events(m_SocketID, m_sPollID, SRT_EPOLL_IN | SRT_EPOLL_OUT | SRT_EPOLL_ERR, true);
     CGlobEvent::triggerEvent();
+    scheduleRetireIfManaged();
+}
+
+void CUDT::scheduleRetireIfManaged()
+{
+    // A socket in m_Sockets is never unbound, so its multiplexer exists.
+    if (m_bManaged && m_State == SSS_BROKEN && m_parent->m_iMuxID != -1 && m_pMuxer)
+    {
+        HLOGC(smlog.Debug, log << CONID() << "broken and managed - scheduled for closing by the worker");
+        m_pMuxer->scheduleDelete(m_SocketID);
+    }
 }
 
 void CUDT::completeBrokenConnectionDependencies(int errorcode)

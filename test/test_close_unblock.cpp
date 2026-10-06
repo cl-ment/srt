@@ -194,3 +194,34 @@ TEST_F(CloseUnblock, EpollWait)
 
     srt_epoll_release(eid);
 }
+
+// Closing a listener closes the connections that have not been accepted
+// (the peer gets the shutdown) and releases the port.
+TEST_F(CloseUnblock, ListenerClosesNonAccepted)
+{
+    listen(SRTT_LIVE);
+    m_caller = srt_create_socket();
+    ASSERT_NE(m_caller, SRT_INVALID_SOCK);
+    srt::sockaddr_any sa = srt::CreateAddr("127.0.0.1", m_port, AF_INET);
+    ASSERT_NE(srt_connect(m_caller, sa.get(), sa.size()), SRT_INVALID_SOCK);
+    ASSERT_EQ(srt_getsockstate(m_caller), SRTS_CONNECTED);
+
+    EXPECT_EQ(srt_close(m_listener), SRT_STATUS_OK);
+    m_listener = SRT_INVALID_SOCK;
+
+    // Peer idle timeout is 5 s; the shutdown must come much earlier.
+    const auto deadline = chrono::steady_clock::now() + chrono::seconds(2);
+    SRT_SOCKSTATUS st = srt_getsockstate(m_caller);
+    while (st == SRTS_CONNECTED && chrono::steady_clock::now() < deadline)
+    {
+        this_thread::sleep_for(chrono::milliseconds(20));
+        st = srt_getsockstate(m_caller);
+    }
+    EXPECT_EQ(st, SRTS_BROKEN);
+
+    // The port is released.
+    SRTSOCKET again = srt_create_socket();
+    ASSERT_NE(again, SRT_INVALID_SOCK);
+    EXPECT_NE(srt_bind(again, sa.get(), sa.size()), SRT_ERROR);
+    srt_close(again);
+}

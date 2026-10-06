@@ -988,9 +988,15 @@ int CEPoll::update_events(const SRTSOCKET& uid, set<int>& eids, const int events
         CEPollDesc::Wait* pwait = ed.watch_find(uid);
         if (!pwait)
         {
-            // As this is mapped in the socket's data, it should be impossible.
-            LOGC(eilog.Error, log << "epoll/update: IPE: update struck E"
-                    << (*i) << " which is NOT SUBSCRIBED to @" << uid);
+            // Clearing the events of a socket that has been already wiped out
+            // (e.g. a broken managed socket retired by its multiplexer worker
+            // while the application removes it from the EID) is harmless.
+            // Otherwise, as this is mapped in the socket's data, it should be impossible.
+            if (enable)
+            {
+                LOGC(eilog.Error, log << "epoll/update: IPE: update struck E"
+                        << (*i) << " which is NOT SUBSCRIBED to @" << uid);
+            }
             continue;
         }
 

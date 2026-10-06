@@ -648,6 +648,10 @@ public: // internal API
 
     static CUDTUnited& uglobal();                      // UDT global management base
 
+    // A broken socket that no application owns (managed) is closed by the
+    // receiver worker of its multiplexer.
+    void scheduleRetireIfManaged();
+
     static SocketKeeper keep_none() { SocketKeeper k(uglobal()); return k; }
     static SocketKeeper keep_noacquire(CUDTSocket* s) { SocketKeeper k(uglobal(), s, false); return k; }
     static SocketKeeper keep(CUDTSocket* s = NULL, std::string loc = "");
@@ -1215,8 +1219,6 @@ private:
     sync::atomic<int> m_AgentCloseReason;
     sync::atomic<int> m_PeerCloseReason;
     atomic_time_point m_CloseTimeStamp;    // Time when the close reason was first set
-                                                 // A counter (number of GC checks happening every 1s) to let the GC tag this socket as closed.   
-    sync::atomic<int> m_iBrokenCounter;          // If a broken socket still has data in the receiver buffer, it is not marked closed until the counter is 0.
 
     int m_iEXPCount;                             // Expiration counter
     sync::atomic<int> m_iBandwidth;              // Estimated bandwidth, number of packets per second
