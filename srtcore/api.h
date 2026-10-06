@@ -143,13 +143,6 @@ public:
     }
 
 
-    /// Time when the socket is closed.
-    /// When the socket is closed, it is not removed immediately from the list
-    /// of sockets in order to prevent other methods from accessing invalid address.
-    /// A timer is started and the socket will be removed after approximately
-    /// 1 second (see CUDTUnited::checkBrokenSockets()).
-    //sync::steady_clock::time_point m_tsClosureTimeStamp;
-    sync::AtomicClock<sync::steady_clock> m_tsClosureTimeStamp;
 
     sockaddr_any m_SelfAddr; //< local address of the socket
 
@@ -309,18 +302,13 @@ public:
     /// @return The new UDT socket ID, or INVALID_SOCK.
     SRTSOCKET newSocket(CUDTSocket** pps = NULL, bool managed = false);
 
-    enum SwipeSocketTerm { SWIPE_NOW = 0, SWIPE_LATER = 1 };
-   /// Removes the socket from the global socket container
-   /// and place it in the socket trashcan. The socket should
-   /// remain there until all still pending activities are
-   /// finished and there are no more users of this socket.
-   /// Note that the swiped socket is no longer dispatchable
-   /// by id.
-   /// @param id socket ID to swipe.
+   /// Removes the closed socket from the global socket container, so that
+   /// it is no longer dispatchable by id, and records its close reason.
+   /// A socket bound to a multiplexer is then deleted by its receiver
+   /// worker; otherwise the caller must call removeClosedSocket_LOCKED().
    /// @param s pointer to the socket to swipe.
-   /// @param action only add to closed list or remove completely
    SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
-   void swipeSocket_LOCKED(SRTSOCKET id, CUDTSocket* s, SwipeSocketTerm);
+   void swipeSocket_LOCKED(CUDTSocket* s);
 
     /// Create (listener-side) a new socket associated with the incoming connection request.
     /// @param [in] listen the listening socket ID.
@@ -464,16 +452,8 @@ public:
         return output;
     }
 
-    std::vector<SRTSOCKET> getClosedSockets()
-    {
-        sync::SharedLock locked(m_GlobControlLock);
-
-        std::vector<SRTSOCKET> output;
-        for (sockets_t::iterator i = m_ClosedSockets.begin(); i != m_ClosedSockets.end(); ++i)
-            output.push_back(i->first);
-
-        return output;
-    }
+    // Closed sockets not yet deleted (testing).
+    std::vector<SRTSOCKET> getClosedSockets();
 
 private:
     /// Generates a new socket ID. This function starts from a randomly
@@ -591,12 +571,6 @@ public:
 
 private:
 
-    SRT_TSA_NEEDS_LOCKED(m_InitLock)
-    bool startGarbageCollector();
-
-    SRT_TSA_NEEDS_LOCKED(m_InitLock)
-    void stopGarbageCollector();
-
     // This function has disabled TSA because this ia a part
     // of fork handler and hence only one thread is active.
     SRT_TSA_DISABLED
@@ -611,9 +585,6 @@ private:
 
     void updateMux(CUDTSocket* s, const sockaddr_any& addr, const SYSSOCKET* = NULL);
     bool updateListenerMux(CUDTSocket* s, const CUDTSocket* ls);
-
-    SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
-    void checkRemoveMux(CMultiplexer&);
 
     // Utility functions for updateMux
     void installMuxer(CUDTSocket* w_s, CMultiplexer* sm);
@@ -653,45 +624,32 @@ private:
     CCache<CInfoBlock>* const m_pCache;
 
 private:
-    sync::atomic<bool>      m_bGCClosing;
-    sync::Mutex             m_GCStartLock;
-    sync::Mutex             m_GCStopLock;
-    sync::Condition         m_GCStopCond;
-
     sync::Mutex m_InitLock;
     SRT_TSA_GUARDED_BY(m_InitLock)
     int         m_iInstanceCount; // number of startup() called by application
     SRT_TSA_GUARDED_BY(m_InitLock)
-    sync::atomic<bool>      m_bGCStatus;      // if the GC thread is working (true)
+    sync::atomic<bool>      m_bStarted; // startup() called or a socket created
 
-    SRT_TSA_GUARDED_BY(m_InitLock)
-    sync::CThread m_GCThread;
-    static void*  garbageCollect(void*);
-
-    SRT_TSA_GUARDED_BY(m_GlobControlLock)
-    sockets_t m_ClosedSockets; // temporarily store closed sockets
 #if SRT_ENABLE_BONDING
     void disposeGroup_LOCKED(CUDTGroup* g);
 #endif
 
-    void checkBrokenSockets();
-
     /// Delete a closed socket, from the receiver worker thread of its
     /// multiplexer. Returns false if the socket can't be deleted yet
     /// (still busy or lingering), true if it's deleted or gone.
-    bool deleteClosedSocket(SRTSOCKET u);
-
-    // Attempts to remove the socket that is already closed.
-    // Returns non-null multiplexer if this multiplexer was
-    // holding this socket and removal has succeeded.
-    SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
-    CMultiplexer* tryRemoveClosedSocket(const SRTSOCKET u);
-    SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
-    CMultiplexer* tryRemoveClosedSocket(CUDTSocket* s);
+    bool deleteClosedSocket(CMultiplexer* mux, SRTSOCKET u);
 
     SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
-    CMultiplexer* tryUnbindClosedSocket(const SRTSOCKET u);
+    void unbindSocket_LOCKED(CUDTSocket* s);
+
+    SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
+    void removeClosedSocket_LOCKED(CUDTSocket* s);
+
+    SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
     void tryReleaseMuxer(int mid);
+
+    SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
+    void releaseMuxer_LOCKED(CMultiplexer* mux);
 
     CEPoll m_EPoll; // handling epoll data structures and events
 

@@ -444,8 +444,8 @@ protected:
         if (bindsock == SRT_INVALID_SOCK)
             return;
 
-        // Poll finely: the socket is reaped by the GC, whose cycle is 1s, so a
-        // coarse period would just add up to a whole extra period of latency.
+        // Poll finely: the socket is deleted by its multiplexer worker
+        // shortly after it is closed.
         std::chrono::milliseconds check_period (5);
         int credit = 2000; // 10 seconds
         auto then = std::chrono::steady_clock::now();

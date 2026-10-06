@@ -1017,10 +1017,8 @@ void CRcvQueue::updateConnStatus(EReadStatus rst, EConnectStatus cst, const CPac
         CUDT::uglobal().m_EPoll.update_events(
             i->u->m_SocketID, i->u->m_sPollID, SRT_EPOLL_IN | SRT_EPOLL_OUT | SRT_EPOLL_ERR, true);
 
-        // Make sure that the socket wasn't deleted in the meantime.
-        // Skip this part if it was. Note also that if the socket was
-        // decided to be deleted, it's already moved to m_ClosedSockets
-        // and should have been therefore already processed for deletion.
+        // The socket can't be deleted in the meantime: this is
+        // its multiplexer worker, which is the one deleting it.
 
         i->u->completeBrokenConnectionDependencies(i->errorcode);
     }
@@ -2419,7 +2417,7 @@ bool CMultiplexer::processDeleteQueue()
     vector<SRTSOCKET> remaining;
     for (vector<SRTSOCKET>::iterator i = ids.begin(); i != ids.end(); ++i)
     {
-        if (!CUDT::uglobal().deleteClosedSocket(*i))
+        if (!CUDT::uglobal().deleteClosedSocket(this, *i))
             remaining.push_back(*i);
     }
 
@@ -2461,6 +2459,23 @@ bool CMultiplexer::collectIfAllClosed(vector<SRTSOCKET>& w_ids)
         w_ids.push_back(i->m_pSocket->id());
     }
     return true;
+}
+
+void CMultiplexer::collectSocketIds(vector<SRTSOCKET>& w_ids) const
+{
+    ScopedLock lk (m_SocketsLock);
+    w_ids.clear();
+    for (socklist_t::const_iterator i = m_Sockets.begin(); i != m_Sockets.end(); ++i)
+        w_ids.push_back(i->m_pSocket->id());
+}
+
+CUDTSocket* CMultiplexer::findSocket(SRTSOCKET id) const
+{
+    ScopedLock lk (m_SocketsLock);
+    sockmap_t::const_iterator fo = m_SocketMap.find(id);
+    if (fo == m_SocketMap.end())
+        return NULL;
+    return fo->second->m_pSocket;
 }
 
 void srt::CMultiplexer::resetAtFork()

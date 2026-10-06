@@ -997,8 +997,8 @@ public:
     // For testing
     std::string testAllSocketsClear();
 
-    /// Schedule the deletion of a closed socket (SSS_CLOSED, already in
-    /// CUDTUnited::m_ClosedSockets). The deletion is done by the receiver
+    /// Schedule the deletion of a closed socket (already removed from
+    /// CUDTUnited::m_Sockets). The deletion is done by the receiver
     /// worker thread, between two iterations of its loop, so that no raw
     /// pointer to the socket is still in use in this thread.
     void scheduleDelete(SRTSOCKET id);
@@ -1012,6 +1012,11 @@ public:
     /// Collect the IDs of all sockets of this multiplexer if they are all
     /// closed (SSS_CLOSED). Returns false (and leaves w_ids empty) if any is not.
     bool collectIfAllClosed(std::vector<SRTSOCKET>& w_ids);
+
+    void collectSocketIds(std::vector<SRTSOCKET>& w_ids) const;
+
+    /// Returns the socket bound to this multiplexer, or NULL.
+    CUDTSocket* findSocket(SRTSOCKET id) const;
 
     bool addSocket(CUDTSocket* s);
     bool deleteSocket(SRTSOCKET id);
