@@ -13340,7 +13340,7 @@ void CUDT::completeBrokenConnectionDependencies(int errorcode)
             // XXX This somehow can cause a deadlock
             // uglobal()->close(m_parent);
             LOGC(smlog.Debug, log << "updateBrokenConnection...: BROKEN SOCKET @" << m_SocketID << " - CLOSING, to be removed from group.");
-            m_parent->setBrokenClosed();
+            m_parent->setBrokenManaged();
         }
     }
 

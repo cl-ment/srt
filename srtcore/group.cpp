@@ -2439,7 +2439,7 @@ int CUDTGroup::sendMultilink(const char* buf, int len, SRT_MSGCTRL& w_mc, bool u
             // This only sets the state to the socket; the GC process should
             // pick it up at the next time.
             HLOGC(gslog.Debug, log << "grp/sendMultilink: per PARTIAL SUCCESS, closing failed @" << is->id);
-            is->mb->ps->setBrokenClosed();
+            is->mb->ps->setBrokenManaged();
         }
     }
 
@@ -4249,7 +4249,7 @@ void CUDTGroup::send_CloseBrokenSockets(vector<SRTSOCKET>& w_wipeme)
 
             // As per sending, make it also broken so that scheduled
             // packets will be also abandoned.
-            s->setClosed();
+            s->setBrokenManaged();
         }
     }
 
@@ -4292,7 +4292,7 @@ void CUDTGroup::sendBackup_CloseBrokenSockets(SendBackupCtx& w_sendBackupCtx)
 
         // As per sending, make it also broken so that scheduled
         // packets will be also abandoned.
-        s->setBrokenClosed();
+        s->setBrokenManaged();
     }
 
     // TODO: all broken members are to be removed from the context now???

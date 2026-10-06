@@ -207,10 +207,12 @@ public:
     /// connection, including for sending remaining data).
     void breakSocket_LOCKED(int reason);
 
-    /// This makes the socket no longer capable of performing any transmission
-    /// operation, but continues to be responsive in the connection in order
-    /// to finish sending the data that were scheduled for sending so far.
-    void setClosed();
+    /// Switch the socket to SSS_CLOSED, the terminal state. Only one thread
+    /// can succeed: it becomes the owner of the closure and must retire the
+    /// socket from m_Sockets (under m_GlobControlLock). A thread that can't
+    /// do it must use setBrokenManaged() instead.
+    /// @return true if this call has closed the socket, false if it was already closed.
+    bool setClosed();
 
     // This is necessary to be called from the group before the group clears
     // the connection with the socket. As for managed groups (and there are
@@ -236,10 +238,10 @@ public:
         core().notifyBlockingConnect();
     }
 
-    /// This does the same as setClosed, plus sets the m_bBroken to true.
-    /// Such a socket can still be read from so that remaining data from
-    /// the receiver buffer can be read, but no longer sends anything.
-    void setBrokenClosed();
+    /// Switch the socket to SSS_BROKEN and let the GC close and retire it
+    /// (managed). Such a socket can still be read from so that remaining data
+    /// from the receiver buffer can be read, but no longer sends anything.
+    void setBrokenManaged();
     void removeFromGroup(bool broken);
 
     void breakNonAcceptedSockets();

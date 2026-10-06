@@ -182,25 +182,26 @@ void CUDTSocket::breakSocket_LOCKED(int reason)
     m_UDT.m_iBrokenCounter = 0;
     HLOGC(smlog.Debug, log << "@" << m_UDT.m_SocketID << " CLOSING AS SOCKET");
     m_UDT.closeEntity(reason);
-    setClosed();
 }
 
-void CUDTSocket::setClosed()
+bool CUDTSocket::setClosed()
 {
-    m_UDT.m_State = CUDT::SSS_CLOSED;
+    if (!m_UDT.setState(CUDT::SSS_CLOSED))
+        return false;
+
     // a socket will not be immediately removed when it is closed
     // in order to prevent other methods from accessing invalid address
     // a timer is started and the socket will be removed after approximately
     // 1 second
     m_tsClosureTimeStamp = steady_clock::now();
+    return true;
 }
 
-void CUDTSocket::setBrokenClosed()
+void CUDTSocket::setBrokenManaged()
 {
     m_UDT.m_iBrokenCounter = 60;
-    // TO_REMOVE m_UDT.m_bBroken        = true;
+    m_UDT.m_bManaged = true;
     m_UDT.setState(CUDT::SSS_BROKEN);
-    setClosed();
 }
 
 bool CUDTSocket::readReady() const
@@ -459,6 +460,7 @@ void CUDTUnited::closeAllSockets()
             // NOTE: not removing the socket from m_Sockets.
             // This is a loop over m_Sockets and after this loop ends,
             // this whole container will be cleared.
+            s->setClosed();
             swipeSocket_LOCKED(i->first, s, SWIPE_LATER);
 
             if (s->m_ListenSocket != SRT_SOCKID_CONNREQ)
@@ -775,8 +777,9 @@ int CUDTUnited::newConnection(const SRTSOCKET     listener,
         // TO_REMOVE if (ns->core().m_bBroken)
         if (ns->core().m_State == CUDT::SSS_BROKEN)
         {
-            // last connection from the "peer" address has been broken
-            ns->setClosed();
+            // last connection from the "peer" address has been broken;
+            // no one can accept it anymore, so let the GC close it.
+            ns->setBrokenManaged();
             HLOGC(cnlog.Debug, log << "newConnection: @" << ns->id() << " broken - deleting from queued");
 
             ScopedLock acceptcg(ls->m_AcceptLock);
@@ -1072,7 +1075,6 @@ ERR_ROLLBACK:
 
         SRTSOCKET id = ns->id();
         ns->closeInternal(SRT_CLS_LATE);
-        ns->setClosed();
 
         // The mapped socket should be now unmapped to preserve the situation that
         // was in the original UDT code.
@@ -1081,6 +1083,8 @@ ERR_ROLLBACK:
         // further processed and should be removed.
         {
             ExclusiveLock cg(m_GlobControlLock);
+            if (!ns->setClosed())
+                return -1; // already closed and retired by another thread
 
 #if SRT_ENABLE_BONDING
             if (ns->m_GroupOf)
@@ -2750,14 +2754,19 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
         // for a long enough time. Worst case scenario, it won't be dispatched
         // to a multiplexer - already under a lock, of course.
         s->core().setState(CUDT::SSS_CLOSING);
-        if (pw_owner)
-            *pw_owner = true;
         {
             // Need to protect the existence of the multiplexer.
             // Multiple threads are allowed to dispose it and only
             // one can succeed. But in this case here we need it
             // out possibly immediately.
             ExclusiveLock manager_cg(m_GlobControlLock);
+            if (!s->setClosed())
+            {
+                HLOGC(smlog.Debug, log << "@" << s->id() << "U::close: already closed by another thread.");
+                return SRT_STATUS_OK;
+            }
+            if (pw_owner)
+                *pw_owner = true;
             swipeSocket_LOCKED(s->id(), s, SWIPE_NOW);
             CMultiplexer* mux = tryUnbindClosedSocket(s->id());
 
@@ -2772,7 +2781,6 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
             {
                 checkRemoveMux(*mux);
             }
-            s->setClosed();
         }
 
         // broadcast all "accept" waiting
@@ -2805,13 +2813,12 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
         // from the container, though it would be more efficient.
         // FURTHER RESEARCH REQUIRED.
         sockets_t::iterator i = m_Sockets.find(u);
-        if ((i == m_Sockets.end()) || (i->second->core().m_State == CUDT::SSS_CLOSED))
+        if ((i == m_Sockets.end()) || !i->second->setClosed())
         {
             HLOGC(smlog.Debug, log << "@" << u << "U::close: NOT AN ACTIVE SOCKET, returning.");
             return SRT_STATUS_OK;
         }
         s = i->second;
-        s->setClosed();
         if (pw_owner)
             *pw_owner = true;
 
@@ -3603,7 +3610,12 @@ void CUDTUnited::checkBrokenSockets()
         recordCloseReason(s);
 
         // close broken connections and start removal timer
-        s->setClosed();
+        if (!s->setClosed())
+        {
+            // A socket in m_Sockets is never CLOSED: the thread that closes it
+            // also retires it, under m_GlobControlLock.
+            LOGC(smlog.Error, log << "checkBrokenSockets: IPE: @" << i->first << " already CLOSED in m_Sockets");
+        }
         tbc.push_back(i->first);
 
         // NOTE: removal from m_SocketID POSTPONED
@@ -3730,6 +3742,10 @@ void CUDTUnited::closeLeakyAcceptSockets(CUDTSocket* s)
         CUDTSocket* as = si->second;
 
         as->breakSocket_LOCKED(SRT_CLS_DEADLSN);
+        if (!as->setClosed())
+        {
+            LOGC(smlog.Error, log << "closeLeakyAcceptSockets: IPE: @" << q->first << " already CLOSED in m_Sockets");
+        }
 
         // You won't be updating any EIDs anymore.
         m_EPoll.wipe_usock(as->id(), as->core().m_sPollID);
