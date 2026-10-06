@@ -221,6 +221,7 @@ CUDTGroup::CUDTGroup(SRT_GROUP_TYPE gtype)
 #endif
     , m_type(gtype)
     , m_iBusy()
+    , m_bOrphan(false)
     , m_iRcvPossibleLossSeq(SRT_SEQNO_NONE)
     , m_iSndOldestMsgNo(SRT_MSGNO_NONE)
     , m_iSndAckedMsgNo(SRT_MSGNO_NONE)
@@ -4404,12 +4405,12 @@ RetryWaitBlocked:
             if (i->second & SRT_EPOLL_ERR)
             {
                 SRTSOCKET   id = i->first;
-                CUDTSocket* s = m_Global.locateSocket(id, ERH_RETURN); // << LOCKS m_GlobControlLock!
-                if (s)
+                SocketKeeper sk = SOCKET_KEEP(id, ERH_RETURN); // << LOCKS m_GlobControlLock!
+                if (sk.socket)
                 {
                     HLOGC(gslog.Debug, log << "grp/sendBackup: swait/ex on @" << id
                             << " while waiting for any writable socket - CLOSING");
-                    CUDT::uglobal().close(s, SRT_CLS_INTERNAL); // << LOCKS m_GlobControlLock, then GroupLock!
+                    CUDT::uglobal().close(sk.socket, SRT_CLS_INTERNAL); // << LOCKS m_GlobControlLock, then GroupLock!
                 }
                 else
                 {

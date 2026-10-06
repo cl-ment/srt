@@ -119,9 +119,23 @@ public:
 
 private:
     sync::atomic<int> m_iBusy;
+
+    // Set when the socket is no longer referenced by any container: it is
+    // then deleted by whoever releases it last.
+    sync::atomic<bool> m_bOrphan;
+    sync::atomic<bool> m_bDeleteClaimed;
+
+    bool claimDeletion() { return !m_bDeleteClaimed.exchange(true); }
+
 public:
     int apiAcquire();
+
+    // NOTE: may delete the socket, if it is orphan and this was the last user.
     int apiRelease();
+
+    // The socket must be removed from all containers. Deletes it
+    // now if it is not busy, otherwise at its last release.
+    void makeOrphan();
 
     int isStillBusy() const
     {
@@ -555,10 +569,15 @@ private:
                 // We have a guarantee that if `group` was set
                 // as non-NULL here, it is also acquired and will not
                 // be deleted until this busy flag is set back to false.
-                sync::ScopedLock cgroup(*group->exp_groupLock());
-                group->apiRelease();
-                // Only now that the group lock is lifted, can the
-                // group be now deleted and this pointer potentially dangling
+                bool unused;
+                {
+                    sync::ScopedLock cgroup(*group->exp_groupLock());
+                    group->apiRelease();
+                    unused = group->isOrphanUnused_LOCKED();
+                }
+                // The last user of a deleted group deletes it.
+                if (unused)
+                    delete group;
             }
         }
     };
@@ -652,8 +671,7 @@ private:
     SRT_TSA_GUARDED_BY(m_GlobControlLock)
     sockets_t m_ClosedSockets; // temporarily store closed sockets
 #if SRT_ENABLE_BONDING
-    SRT_TSA_GUARDED_BY(m_GlobControlLock)
-    groups_t m_ClosedGroups;
+    void disposeGroup_LOCKED(CUDTGroup* g);
 #endif
 
     void checkBrokenSockets();
@@ -680,17 +698,18 @@ private:
     struct CloseInfo
     {
         SRT_CLOSE_INFO info;
-        int generation;
 
-        // The value here defines how many GC rolls it takes
-        // to remove the record. As GC rolls every 1 second,
-        // this is more-less the number of seconds this record
-        // will be alive AFTER you close the socket.
-        CloseInfo(): info(), generation(MAX_CLOSE_RECORD_TTL) {}
+        // The record is kept MAX_CLOSE_RECORD_TTL seconds after the socket is closed.
+        sync::steady_clock::time_point expires;
+
+        CloseInfo()
+            : info()
+            , expires(sync::steady_clock::now() + sync::seconds_from(MAX_CLOSE_RECORD_TTL))
+        {
+        }
     };
     std::map<SRTSOCKET, CloseInfo> m_ClosedDatabase;
 
-    void checkTemporaryDatabases();
     void recordCloseReason(CUDTSocket* s);
 
     SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)

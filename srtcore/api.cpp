@@ -97,6 +97,8 @@ void CUDTSocket::construct()
     setupMutex(m_AcceptLock, "Accept");
     setupCond(m_AcceptCond, "Accept");
     setupMutex(m_ControlLock, "Control");
+    m_bOrphan = false;
+    m_bDeleteClaimed = false;
 }
 
 CUDTSocket::~CUDTSocket()
@@ -117,7 +119,26 @@ int CUDTSocket::apiRelease()
 {
     int busy = --m_iBusy;
     HLOGC(smlog.Debug, log << "@" << id() << " RELEASE; BUSY=" << busy << " }");
+    if (busy == 0 && m_bOrphan && claimDeletion())
+    {
+        HLOGC(smlog.Debug, log << "@" << id() << " orphan released by its last user - DELETING");
+        delete this;
+    }
     return busy;
+}
+
+void CUDTSocket::makeOrphan()
+{
+    // Either this or the last apiRelease() sees the other's
+    // modification, and only one of them can claim the deletion.
+    m_bOrphan = true;
+    if (m_iBusy == 0 && claimDeletion())
+    {
+        HLOGC(smlog.Debug, log << "@" << id() << " orphan not busy - DELETING");
+        delete this;
+        return;
+    }
+    HLOGC(smlog.Debug, log << "@" << id() << " orphan still busy - deleted by its last user");
 }
 
 void CUDTSocket::resetAtFork()
@@ -491,8 +512,7 @@ void CUDTUnited::closeAllSockets()
 #if SRT_ENABLE_BONDING
         for (groups_t::iterator j = m_Groups.begin(); j != m_Groups.end(); ++j)
         {
-            SRTSOCKET id = j->second->m_GroupID;
-            m_ClosedGroups[id] = j->second;
+            disposeGroup_LOCKED(j->second);
         }
         m_Groups.clear();
 #endif
@@ -1108,6 +1128,10 @@ ERR_ROLLBACK:
             m_EPoll.wipe_usock(id, ns->core().m_sPollID);
 
             swipeSocket_LOCKED(id, ns, SWIPE_NOW);
+
+            // Not bound (e.g. rejected by the accept hook): no worker deletes it.
+            if (ns->m_iMuxID == -1)
+                tryRemoveClosedSocket(id);
         }
 
         return -1;
@@ -1277,7 +1301,7 @@ SRTSTATUS CUDTUnited::getCloseReason(const SRTSOCKET u, SRT_CLOSE_INFO& info)
     }
 
     map<SRTSOCKET, CloseInfo>::iterator c = m_ClosedDatabase.find(u);
-    if (c == m_ClosedDatabase.end())
+    if (c == m_ClosedDatabase.end() || c->second.expires <= steady_clock::now())
         return SRT_ERROR;
 
     info = c->second.info;
@@ -2364,12 +2388,12 @@ SRTSOCKET CUDTUnited::groupConnect(CUDTGroup* pg, SRT_SOCKGROUPCONFIG* targets, 
 
     for (vector<SRTSOCKET>::iterator b = broken.begin(); b != broken.end(); ++b)
     {
-        CUDTSocket* s = locateSocket(*b, ERH_RETURN);
-        if (!s)
+        SocketKeeper sk = SOCKET_KEEP(*b, ERH_RETURN);
+        if (!sk.socket)
             continue;
 
         // This will also automatically remove it from the group and all eids
-        close(s, SRT_CLS_INTERNAL);
+        close(sk.socket, SRT_CLS_INTERNAL);
     }
 
     // There's no possibility to report a problem on every connection
@@ -2516,10 +2540,9 @@ void CUDTUnited::deleteGroup_LOCKED(CUDTGroup* g)
 
     // After that the group is no longer findable by GroupKeeper
     m_Groups.erase(g->m_GroupID);
-    m_ClosedGroups[g->m_GroupID] = g;
 
-    // Paranoid check: since the group is in m_ClosedGroups
-    // it may potentially be deleted. Make sure no socket points
+    // Paranoid check: since the group is about to be deleted,
+    // make sure no socket points
     // to it. Actually all sockets should have been already removed
     // from the group container, so if any does, it's invalid.
     for (sockets_t::iterator i = m_Sockets.begin(); i != m_Sockets.end(); ++i)
@@ -2545,6 +2568,24 @@ void CUDTUnited::deleteGroup_LOCKED(CUDTGroup* g)
             s->m_GroupMemberData = NULL;
         }
     }
+
+    disposeGroup_LOCKED(g);
+}
+
+// The group must be already removed from m_Groups. Deletes it now if
+// no API call uses it, otherwise its last GroupKeeper deletes it.
+// [[using locked(m_GlobControlLock)]]
+void CUDTUnited::disposeGroup_LOCKED(CUDTGroup* g)
+{
+    bool unused;
+    {
+        ScopedLock gl(*g->exp_groupLock());
+        g->setOrphan_LOCKED();
+        unused = g->isOrphanUnused_LOCKED();
+    }
+    HLOGC(smlog.Debug, log << "disposeGroup: $" << g->id() << (unused ? " DELETING" : " busy - deleted by its last user"));
+    if (unused)
+        delete g;
 }
 #endif
 
@@ -2555,6 +2596,16 @@ void CUDTUnited::recordCloseReason(CUDTSocket* s)
     ci.info.agent = SRT_CLOSE_REASON(s->core().m_AgentCloseReason.load());
     ci.info.peer = SRT_CLOSE_REASON(s->core().m_PeerCloseReason.load());
     ci.info.time = sync::count_microseconds(s->core().m_CloseTimeStamp.load().time_since_epoch());
+
+    // Remove the expired records.
+    const steady_clock::time_point now = steady_clock::now();
+    for (map<SRTSOCKET, CloseInfo>::iterator x = m_ClosedDatabase.begin(); x != m_ClosedDatabase.end();)
+    {
+        if (x->second.expires <= now)
+            m_ClosedDatabase.erase(x++);
+        else
+            ++x;
+    }
 
     m_ClosedDatabase[s->id()] = ci;
 
@@ -2755,6 +2806,9 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
                 *pw_owner = true;
             swipeSocket_LOCKED(s->id(), s, SWIPE_NOW);
             tryReleaseMuxer(s->m_iMuxID);
+            // Unbound now: deleted at the release of the caller's SocketKeeper.
+            if (s->m_iMuxID == -1)
+                tryRemoveClosedSocket(s->id());
         }
 
         // broadcast all "accept" waiting
@@ -2827,6 +2881,10 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
 
         swipeSocket_LOCKED(s->id(), s, SWIPE_NOW);
         tryReleaseMuxer(s->m_iMuxID);
+        // Unbound now (or never bound): deleted at the release of the
+        // caller's SocketKeeper. Otherwise its multiplexer worker deletes it.
+        if (s->m_iMuxID == -1)
+            tryRemoveClosedSocket(s->id());
 
         HLOGC(smlog.Debug, log << "@" << u << "U::close: Socket MOVED TO CLOSED for collecting later.");
 
@@ -3460,32 +3518,6 @@ void CUDTUnited::checkBrokenSockets()
 {
     ExclusiveLock cg(m_GlobControlLock);
 
-#if SRT_ENABLE_BONDING
-    vector<SRTSOCKET> delgids;
-
-    for (groups_t::iterator i = m_ClosedGroups.begin(); i != m_ClosedGroups.end(); ++i)
-    {
-        // isStillBusy requires lock on the group, so only after an API
-        // function that uses it returns, and so clears the busy flag,
-        // a new API function won't be called anyway until it can acquire
-        // GlobControlLock, and all functions that have already seen this
-        // group as closing will not continue with the API and return.
-        // If we caught some API function still using the closed group,
-        // it's not going to wait, will be checked next time.
-        if (i->second->isStillBusy())
-            continue;
-
-        delgids.push_back(i->first);
-        delete i->second;
-        i->second = NULL; // just for a case, avoid a dangling pointer
-    }
-
-    for (vector<SRTSOCKET>::iterator di = delgids.begin(); di != delgids.end(); ++di)
-    {
-        m_ClosedGroups.erase(*di);
-    }
-#endif
-
     // set of sockets To Be Closed and To Be Removed
     vector<SRTSOCKET> tbc;
     vector<SRTSOCKET> tbr;
@@ -3961,7 +3993,9 @@ CMultiplexer* CUDTUnited::tryRemoveClosedSocket(const SRTSOCKET u)
 
     IF_HEAVY_LOGGING(SRTSOCKET id = s->id());
 
-    if (s->isStillBusy())
+    // A busy socket still bound is deleted later by its multiplexer worker.
+    // An unbound one is orphaned below and deleted by its last user.
+    if (s->isStillBusy() && s->m_iMuxID != -1)
     {
         HLOGC(smlog.Debug, log << "@" << id << " is still busy, NOT deleting");
         return NULL;
@@ -4053,24 +4087,12 @@ CMultiplexer* CUDTUnited::tryRemoveClosedSocket(const SRTSOCKET u)
         }
     }
 
-    // Check again after reacquisition and removal from the multiplexer.
-    if (s->isStillBusy())
-    {
-        // Unbound now: it will be deleted later by the GC.
-        HLOGC(smlog.Debug, log << "@" << id << " is still busy, NOT deleting");
-        return mux;
-    }
-
-    // delete this one
-    // IMPORTANT!!! After erasing the entry in m_ClosedSockets
-    // the socket must be deleted. If deletion is by any reason not possible,
-    // the socket must stay in m_ClosedSockets so that the next GC cycle can
-    // try again.
+    // No longer referenced by any container: deleted now if not
+    // busy, otherwise by its last user.
     m_ClosedSockets.erase(i);
 
-    HLOGC(smlog.Debug, log << "GC/tryRemoveClosedSocket: DELETING SOCKET @" << u);
-    delete s;
-    HLOGC(smlog.Debug, log << "GC/tryRemoveClosedSocket: socket @" << u << " DELETED. Checking muxer id=" << mid);
+    HLOGC(smlog.Debug, log << "tryRemoveClosedSocket: @" << u << " removed, muxer id=" << mid);
+    s->makeOrphan();
 
     // If deleted a socket, this must return the multiplexer because this is the
     // last moment when it can be deleted (otherwise it would be leaked).
@@ -4134,31 +4156,6 @@ void CUDTUnited::checkRemoveMux(CMultiplexer& mx)
         LOGC(smlog.Debug, log << "MUXER id=" << mid << " has still " << mx.nsockets() << " users" << users);
 #endif
     }
-}
-
-void CUDTUnited::checkTemporaryDatabases()
-{
-    ExclusiveLock cg(m_GlobControlLock);
-
-    // It's not very efficient to collect first the keys of all
-    // elements to remove and then remove from the map by key.
-
-    // In C++20 this is possible by doing
-    //    m_ClosedDatabase.erase_if([](auto& c) { return --c.generation <= 0; });
-    // but nothing equivalent in the earlier standards.
-
-    vector<SRTSOCKET> expired;
-
-    for (map<SRTSOCKET, CloseInfo>::iterator c = m_ClosedDatabase.begin();
-            c != m_ClosedDatabase.end(); ++c)
-    {
-        --c->second.generation;
-        if (c->second.generation <= 0)
-            expired.push_back(c->first);
-    }
-
-    for (vector<SRTSOCKET>::iterator i = expired.begin(); i != expired.end(); ++i)
-        m_ClosedDatabase.erase(*i);
 }
 
 // Muxer in this function is added a socket to its lists and pinning
@@ -4617,7 +4614,6 @@ void* CUDTUnited::garbageCollect(void* p)
     {
         INCREMENT_THREAD_ITERATIONS();
         self->checkBrokenSockets();
-        self->checkTemporaryDatabases();
 
         if (self->m_bGCClosing)
         {

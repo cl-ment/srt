@@ -546,6 +546,8 @@ private:
     GroupContainer m_Group;
     SRT_GROUP_TYPE m_type;
     sync::atomic<int> m_iBusy;
+    SRT_TSA_GUARDED_BY(m_GroupLock)
+    bool m_bOrphan; // removed from m_Groups: deleted by its last user
     CallbackHolder<srt_connect_callback_fn> m_cbConnectHook;
     void installConnectHook(srt_connect_callback_fn* hook, void* opaq)
     {
@@ -555,6 +557,12 @@ private:
 public:
     void apiAcquire() { ++m_iBusy; }
     void apiRelease() { --m_iBusy; }
+
+    // [[using locked(m_GroupLock)]]
+    void setOrphan_LOCKED() { m_bOrphan = true; }
+
+    // [[using locked(m_GroupLock)]]
+    bool isOrphanUnused_LOCKED() const { return m_bOrphan && m_iBusy == 0; }
 
     // A normal cycle of the send/recv functions is the following:
     // - [Initial API call for a group]
