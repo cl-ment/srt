@@ -5882,15 +5882,9 @@ bool srt::CUDT::closeBasic(int reason) ATR_NOEXCEPT
         m_pMuxer->removeSender(this);
     }
 
-    /*
-     * update_events below useless
-     * removing usock for EPolls right after (update_usocks) clears it (in other HAI patch).
-     *
-     * What is in EPoll shall be the responsibility of the application, if it want local close event,
-     * it would remove the socket from the EPoll after close.
-     */
-
+    // Remove the socket from all EIDs and wake up the threads blocked in epoll.
     uglobal().m_EPoll.wipe_usock(m_SocketID, m_sPollID);
+    CGlobEvent::triggerEvent();
 
     // XXX What's this, could any of the above actions make it !m_bOpened?
     if (!m_bOpened)
@@ -6084,12 +6078,14 @@ int CUDT::receiveBuffer(char *data, int len)
                 // fallthrough
             case CUDT::SSS_BROKEN:
                 // fallthrough
+            case CUDT::SSS_CLOSED:
+                // fallthrough
             case CUDT::SSS_CLOSING:
-                // TO_REMOVE if (!m_config.bMessageAPI && m_bShutdown)
-                if (!m_config.bMessageAPI && peerShutdown())
+                // For stream API, return 0 as a sign of EOF for transmission,
+                // when the peer has shut down or the socket was closed locally.
+                if (!m_config.bMessageAPI && (peerShutdown() || isClosingOrClosed()))
                 {
-                    // For stream API, return 0 as a sign of EOF for transmission.
-                    HLOGC(arlog.Debug, log << CONID() << "STREAM API, SHUTDOWN: marking as EOF");
+                    HLOGC(arlog.Debug, log << CONID() << "STREAM API, SHUTDOWN or CLOSED: marking as EOF");
                     return 0;
                 }
                 HLOGC(arlog.Debug,
@@ -6171,8 +6167,9 @@ int CUDT::receiveBuffer(char *data, int len)
 
     // throw an exception if not connected
     // NOTE: must NOT require SSS_CONNECTED, otherwise the SSS_SHUTDOWN case
-    // in the switch below (stream-mode EOF) would be unreachable.
-    if (!wasConnected())
+    // in the switch below (stream-mode EOF) would be unreachable. A call
+    // woken up by srt_close() (CLOSING or CLOSED) is handled there, too.
+    if (!wasConnected() && !isClosingOrClosed())
         throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
 
     if (!isRcvBufferReady())
@@ -6183,11 +6180,14 @@ int CUDT::receiveBuffer(char *data, int len)
                 // fallthrough
             case CUDT::SSS_BROKEN:
                 // fallthrough
+            case CUDT::SSS_CLOSED:
+                // fallthrough
             case CUDT::SSS_CLOSING:
-                // TO_REMOVE if (!m_config.bMessageAPI && m_bShutdown)
-                if (!m_config.bMessageAPI && peerShutdown())
+                // For stream API, return 0 as a sign of EOF for transmission,
+                // when the peer has shut down or the socket was closed locally.
+                if (!m_config.bMessageAPI && (peerShutdown() || isClosingOrClosed()))
                 {
-                    HLOGC(arlog.Debug, log << CONID() << "STREAM API, SHUTDOWN: marking as EOF");
+                    HLOGC(arlog.Debug, log << CONID() << "STREAM API, SHUTDOWN or CLOSED: marking as EOF");
                     return 0;
                 }
                 HLOGC(arlog.Debug,
@@ -6335,6 +6335,8 @@ int CUDT::sendmsg2(const char *data, int len, SRT_MSGCTRL& w_mctrl)
             break;
         case CUDT::SSS_BROKEN:
             // fallthrough
+        case CUDT::SSS_CLOSED:
+            // fallthrough
         case CUDT::SSS_CLOSING:
             throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
 
@@ -6480,6 +6482,8 @@ int CUDT::sendmsg2(const char *data, int len, SRT_MSGCTRL& w_mctrl)
             case CUDT::SSS_CONNECTED:
                 break;
             case CUDT::SSS_BROKEN:
+                // fallthrough
+            case CUDT::SSS_CLOSED:
                 // fallthrough
             case CUDT::SSS_CLOSING:
                 throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
@@ -7015,6 +7019,8 @@ int CUDT::receiveMessage(char* data, int len, SRT_MSGCTRL& w_mctrl, int by_excep
                 break;
             case CUDT::SSS_BROKEN:
                 // fallthrough
+            case CUDT::SSS_CLOSED:
+                // fallthrough
             case CUDT::SSS_CLOSING:
                 {
                     // Forced to return 0 instead of throwing exception.
@@ -7085,6 +7091,8 @@ int64_t CUDT::sendfile(fstream &ifs, int64_t &offset, int64_t size, int block)
         case CUDT::SSS_CONNECTED:
             break;
         case CUDT::SSS_BROKEN:
+            // fallthrough
+        case CUDT::SSS_CLOSED:
             // fallthrough
         case CUDT::SSS_CLOSING:
             throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
@@ -7179,6 +7187,8 @@ int64_t CUDT::sendfile(fstream &ifs, int64_t &offset, int64_t size, int block)
             case CUDT::SSS_CONNECTED:
                 break;
             case CUDT::SSS_BROKEN:
+                // fallthrough
+            case CUDT::SSS_CLOSED:
                 // fallthrough
             case CUDT::SSS_CLOSING:
                 throw CUDTException(MJ_CONNECTION, MN_CONNLOST, 0);
@@ -7788,8 +7798,8 @@ void CUDT::releaseSynch()
         m_bClosing = true;
     }
 #endif 
-    // wake up user calls
-    CSync::lock_notify_one(m_SendBlockCond, m_SendBlockLock);
+    // wake up user calls (all of them: several threads may be blocked in sending)
+    CSync::lock_notify_all(m_SendBlockCond, m_SendBlockLock);
 
     m_SendLock.lock();
     m_SendLock.unlock();
@@ -13470,7 +13480,8 @@ void CUDT::EmitSignal(ETransmissionEvent tev, EventVariant var)
 
 int CUDT::getsndbuffer(SRTSOCKET u, size_t *blocks, size_t *bytes)
 {
-    CUDTSocket *s = uglobal().locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
     if (!s)
         return -1;
 
@@ -13493,7 +13504,8 @@ int CUDT::getsndbuffer(SRTSOCKET u, size_t *blocks, size_t *bytes)
 
 int CUDT::rejectReason(SRTSOCKET u)
 {
-    CUDTSocket* s = uglobal().locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
     if (!s)
         return SRT_REJ_UNKNOWN;
 
@@ -13502,7 +13514,8 @@ int CUDT::rejectReason(SRTSOCKET u)
 
 SRTSTATUS CUDT::rejectReason(SRTSOCKET u, int value)
 {
-    CUDTSocket* s = uglobal().locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
     if (!s)
         return APIError(MJ_NOTSUP, MN_SIDINVAL);
 
@@ -13515,7 +13528,8 @@ SRTSTATUS CUDT::rejectReason(SRTSOCKET u, int value)
 
 int64_t CUDT::socketStartTime(SRTSOCKET u)
 {
-    CUDTSocket* s = uglobal().locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
     if (!s)
         return APIError(MJ_NOTSUP, MN_SIDINVAL).as<int>();
 
@@ -13729,7 +13743,8 @@ HandshakeSide getHandshakeSide(SRTSOCKET u)
 
 HandshakeSide CUDT::handshakeSide(SRTSOCKET u)
 {
-    CUDTSocket *s = uglobal().locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
     return s ? s->core().handshakeSide() : HSD_DRAW;
 }
 } // END namespace srt

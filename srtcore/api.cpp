@@ -1179,7 +1179,8 @@ SRTSTATUS CUDTUnited::installAcceptHook(const SRTSOCKET lsn, srt_listen_callback
 {
     try
     {
-        CUDTSocket* s = locateSocket(lsn, ERH_THROW);
+        SocketKeeper sk = SOCKET_KEEP(lsn, ERH_THROW);
+        CUDTSocket* s = sk.socket;
         s->core().installAcceptHook(hook, opaq);
     }
     catch (CUDTException& e)
@@ -1208,7 +1209,8 @@ SRTSTATUS CUDTUnited::installConnectHook(const SRTSOCKET u, srt_connect_callback
             return SRT_STATUS_OK;
         }
 #endif
-        CUDTSocket* s = locateSocket(u, ERH_THROW);
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_THROW);
+        CUDTSocket* s = sk.socket;
         s->core().installConnectHook(hook, opaq);
     }
     catch (CUDTException& e)
@@ -1337,7 +1339,8 @@ SRTSTATUS CUDTUnited::listen(const SRTSOCKET u, int backlog)
     if (u == SRT_INVALID_SOCK)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
 
-    CUDTSocket* s = locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
     if (!s)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
 
@@ -1546,7 +1549,8 @@ SRTSOCKET CUDTUnited::accept(const SRTSOCKET listen, sockaddr* pw_addr, int* pw_
         throw CUDTException(MJ_SETUP, MN_CLOSED, 0);
     }
 
-    CUDTSocket* s = locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
     if (s == NULL)
     {
         LOGC(cnlog.Error, log << "srt_accept: pending connection has unexpectedly closed");
@@ -1753,7 +1757,8 @@ SRTSOCKET CUDTUnited::connect(SRTSOCKET u, const sockaddr* srcname, const sockad
     }
 #endif
 
-    CUDTSocket* s = locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
     if (s == NULL)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
 
@@ -1792,7 +1797,8 @@ SRTSOCKET CUDTUnited::connect(const SRTSOCKET u, const sockaddr* name, int namel
     }
 #endif
 
-    CUDTSocket* s = locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
     if (!s)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
 
@@ -2457,8 +2463,24 @@ SRTSTATUS CUDTUnited::close(const SRTSOCKET u, int reason)
     IF_HEAVY_LOGGING(ScopedExitLog slog(k.socket));
     HLOGC(smlog.Debug, log << "CUDTUnited::close/begin: @" << u << " busy=" << k.socket->isStillBusy());
 
-    SRTSTATUS cstatus = close(k.socket, reason);
-    HLOGC(smlog.Debug, log << "CUDTUnited::close: internal close status " << cstatus);
+    // A worker thread of the socket's own multiplexer (e.g. from a callback)
+    // can't wait for the other users: it may be one of them. Check it now,
+    // as the multiplexer may be deleted by the close itself.
+    bool from_worker = false;
+    {
+        SharedLock cg(m_GlobControlLock);
+        CMultiplexer* mux = map_getp(m_mMultiplexer, k.socket->m_iMuxID);
+        from_worker = mux && mux->isSelfDestructAttempt();
+    }
+
+    bool owner = false;
+    SRTSTATUS cstatus = close(k.socket, reason, &owner);
+    HLOGC(smlog.Debug, log << "CUDTUnited::close: internal close status " << cstatus << (owner ? " (owner)" : ""));
+
+    // Only the thread that has really closed the socket waits; otherwise
+    // two concurrent srt_close() calls would wait for each other.
+    if (owner && !from_worker)
+        waitForOtherApiCalls(k.socket);
 
     // Releasing under the global lock to avoid even theoretical
     // data race.
@@ -2611,7 +2633,25 @@ void CUDTSocket::breakNonAcceptedSockets()
     }
 }
 
-SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason)
+// Wait until no other thread uses the socket anymore. The closing has woken
+// up all the blocked API calls (recv, send, accept, connect, epoll), so this
+// only lets them return. The caller keeps the socket itself (busy == 1).
+void CUDTUnited::waitForOtherApiCalls(CUDTSocket* s)
+{
+    steady_clock::time_point next_report = steady_clock::now() + seconds_from(1);
+    while (s->isStillBusy() > 1)
+    {
+        sync::this_thread::sleep_for(sync::milliseconds_from(1));
+        if (steady_clock::now() > next_report)
+        {
+            LOGC(smlog.Warn, log << "@" << s->id() << " CLOSE: still used by " << (s->isStillBusy() - 1)
+                    << " other thread(s), waiting.");
+            next_report += seconds_from(1);
+        }
+    }
+}
+
+SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
 {
     // Set the closing flag BEFORE you attempt to acquire
     // the control lock. This is a user-initiated close (srt_close()),
@@ -2699,6 +2739,10 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason)
         // srt_listen() with MN_BUSY because the slot is still taken.
         s->core().notListening();
 
+        // Remove the listener from all EIDs and wake up the threads blocked in epoll.
+        m_EPoll.wipe_usock(s->id(), s->core().m_sPollID);
+        CGlobEvent::triggerEvent();
+
         // Do not lock m_GlobControlLock for that call; this would deadlock.
         // We also get the ID of the muxer, not the muxer object because to get
         // the muxer object you need to lock m_GlobControlLock. The ID may exist
@@ -2706,6 +2750,8 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason)
         // for a long enough time. Worst case scenario, it won't be dispatched
         // to a multiplexer - already under a lock, of course.
         s->core().setState(CUDT::SSS_CLOSING);
+        if (pw_owner)
+            *pw_owner = true;
         {
             // Need to protect the existence of the multiplexer.
             // Multiple threads are allowed to dispose it and only
@@ -2766,6 +2812,8 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason)
         }
         s = i->second;
         s->setClosed();
+        if (pw_owner)
+            *pw_owner = true;
 
 #if SRT_ENABLE_BONDING
         if (s->m_GroupOf)
@@ -2889,7 +2937,8 @@ void CUDTUnited::getpeername(const SRTSOCKET u, sockaddr* pw_name, int* pw_namel
     if (getStatus(u) != SRTS_CONNECTED)
         throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
 
-    CUDTSocket* s = locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
 
     if (!s)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
@@ -2911,7 +2960,8 @@ void CUDTUnited::getsockname(const SRTSOCKET u, sockaddr* pw_name, int* pw_namel
     if (!pw_name || !pw_namelen)
         throw CUDTException(MJ_NOTSUP, MN_INVAL, 0);
 
-    CUDTSocket* s = locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
 
     if (!s)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
@@ -2936,7 +2986,8 @@ void CUDTUnited::getsockdevname(const SRTSOCKET u, char* pw_name, size_t* pw_nam
     if (!pw_name || !pw_namelen)
         throw CUDTException(MJ_NOTSUP, MN_INVAL, 0);
 
-    CUDTSocket* s = locateSocket(u);
+    SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
 
     if (!s)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
@@ -2965,6 +3016,13 @@ void CUDTUnited::getsockdevname(const SRTSOCKET u, char* pw_name, size_t* pw_nam
     *pw_namelen = 0; // report empty one
 }
 
+// Keeps the socket alive in w_keepers for the caller's scope.
+static CUDTSocket* keepSocketIn(list<SocketKeeper>& w_keepers, SRTSOCKET u)
+{
+    w_keepers.push_back(SOCKET_KEEP(u, ERH_RETURN));
+    return w_keepers.back().socket;
+}
+
 int CUDTUnited::select(std::set<SRTSOCKET>* readfds, std::set<SRTSOCKET>* writefds, std::set<SRTSOCKET>* exceptfds, const timeval* timeout)
 {
     const steady_clock::time_point entertime = steady_clock::now();
@@ -2978,6 +3036,7 @@ int CUDTUnited::select(std::set<SRTSOCKET>* readfds, std::set<SRTSOCKET>* writef
 
     // retrieve related UDT sockets
     vector<CUDTSocket*> ru, wu, eu;
+    list<SocketKeeper>  keepers;
     CUDTSocket*         s;
     if (readfds)
         for (set<SRTSOCKET>::iterator i1 = readfds->begin(); i1 != readfds->end(); ++i1)
@@ -2987,7 +3046,7 @@ int CUDTUnited::select(std::set<SRTSOCKET>* readfds, std::set<SRTSOCKET>* writef
                 rs.insert(*i1);
                 ++count;
             }
-            else if (!(s = locateSocket(*i1)))
+            else if (!(s = keepSocketIn((keepers), *i1)))
                 throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
             else
                 ru.push_back(s);
@@ -3000,7 +3059,7 @@ int CUDTUnited::select(std::set<SRTSOCKET>* readfds, std::set<SRTSOCKET>* writef
                 ws.insert(*i2);
                 ++count;
             }
-            else if (!(s = locateSocket(*i2)))
+            else if (!(s = keepSocketIn((keepers), *i2)))
                 throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
             else
                 wu.push_back(s);
@@ -3013,7 +3072,7 @@ int CUDTUnited::select(std::set<SRTSOCKET>* readfds, std::set<SRTSOCKET>* writef
                 es.insert(*i3);
                 ++count;
             }
-            else if (!(s = locateSocket(*i3)))
+            else if (!(s = keepSocketIn((keepers), *i3)))
                 throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
             else
                 eu.push_back(s);
@@ -3093,7 +3152,8 @@ int CUDTUnited::selectEx(const vector<SRTSOCKET>& fds,
     {
         for (vector<SRTSOCKET>::const_iterator i = fds.begin(); i != fds.end(); ++i)
         {
-            CUDTSocket* s = locateSocket(*i);
+            SocketKeeper sk = SOCKET_KEEP(*i, ERH_RETURN);
+            CUDTSocket* s = sk.socket;
 
             if ((!s)
                 // TO_REMOVE || s->core().m_bBroken
@@ -3250,7 +3310,8 @@ void CUDTUnited::epoll_remove_usock(const int eid, const SRTSOCKET u)
     else
 #endif
     {
-        s = locateSocket(u);
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+        s = sk.socket;
         if (s)
             return epoll_remove_entity(eid, &s->core());
     }
@@ -4606,7 +4667,8 @@ SRTSTATUS CUDT::bind(SRTSOCKET u, const sockaddr* name, int namelen)
             // This is a user error.
             return APIError(MJ_NOTSUP, MN_INVAL, 0);
         }
-        CUDTSocket* s = uglobal().locateSocket(u);
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+        CUDTSocket* s = sk.socket;
         if (!s)
             return APIError(MJ_NOTSUP, MN_INVAL, 0);
 
@@ -4631,7 +4693,8 @@ SRTSTATUS CUDT::bind(SRTSOCKET u, SYSSOCKET udpsock)
 {
     try
     {
-        CUDTSocket* s = uglobal().locateSocket(u);
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_RETURN);
+        CUDTSocket* s = sk.socket;
         if (!s)
             return APIError(MJ_NOTSUP, MN_INVAL, 0);
 
@@ -4885,7 +4948,8 @@ SRTSTATUS CUDT::getsockopt(SRTSOCKET u, int, SRT_SOCKOPT optname, void* pw_optva
         }
 #endif
 
-        CUDT& udt = uglobal().locateSocket(u, ERH_THROW)->core();
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_THROW);
+        CUDT& udt = sk.socket->core();
         udt.getOpt(optname, (pw_optval), (*pw_optlen));
         return SRT_STATUS_OK;
     }
@@ -4916,7 +4980,8 @@ SRTSTATUS CUDT::setsockopt(SRTSOCKET u, int, SRT_SOCKOPT optname, const void* op
         }
 #endif
 
-        CUDT& udt = uglobal().locateSocket(u, ERH_THROW)->core();
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_THROW);
+        CUDT& udt = sk.socket->core();
         udt.setOpt(optname, optval, optlen);
         return SRT_STATUS_OK;
     }
@@ -4960,7 +5025,8 @@ int CUDT::sendmsg2(SRTSOCKET u, const char* buf, int len, SRT_MSGCTRL& w_m)
         }
 #endif
 
-        return uglobal().locateSocket(u, ERH_THROW)->core().sendmsg2(buf, len, (w_m));
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_THROW);
+        return sk.socket->core().sendmsg2(buf, len, (w_m));
     }
     catch (const CUDTException& e)
     {
@@ -5004,7 +5070,8 @@ int CUDT::recvmsg2(SRTSOCKET u, char* buf, int len, SRT_MSGCTRL& w_m)
         }
 #endif
 
-        return uglobal().locateSocket(u, ERH_THROW)->core().recvmsg2(buf, len, (w_m));
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_THROW);
+        return sk.socket->core().recvmsg2(buf, len, (w_m));
     }
     catch (const CUDTException& e)
     {
@@ -5021,7 +5088,8 @@ int64_t CUDT::sendfile(SRTSOCKET u, fstream& ifs, int64_t& offset, int64_t size,
 {
     try
     {
-        CUDT& udt = uglobal().locateSocket(u, ERH_THROW)->core();
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_THROW);
+        CUDT& udt = sk.socket->core();
         return udt.sendfile(ifs, offset, size, block);
     }
     catch (const CUDTException& e)
@@ -5043,7 +5111,8 @@ int64_t CUDT::recvfile(SRTSOCKET u, fstream& ofs, int64_t& offset, int64_t size,
 {
     try
     {
-        return uglobal().locateSocket(u, ERH_THROW)->core().recvfile(ofs, offset, size, block);
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_THROW);
+        return sk.socket->core().recvfile(ofs, offset, size, block);
     }
     catch (const CUDTException& e)
     {
@@ -5348,7 +5417,8 @@ SRTSTATUS CUDT::bstats(SRTSOCKET u, CBytePerfMon* perf, bool clear, bool instant
 
     try
     {
-        CUDT& udt = uglobal().locateSocket(u, ERH_THROW)->core();
+        SocketKeeper sk = SOCKET_KEEP(u, ERH_THROW);
+        CUDT& udt = sk.socket->core();
         udt.bstats(perf, clear, instantaneous);
         return SRT_STATUS_OK;
     }
@@ -5438,7 +5508,8 @@ int CUDT::getMaxPayloadSize(SRTSOCKET id)
 
 int CUDTUnited::getMaxPayloadSize(SRTSOCKET id)
 {
-    CUDTSocket* s = locateSocket(id);
+    SocketKeeper sk = SOCKET_KEEP(id, ERH_RETURN);
+    CUDTSocket* s = sk.socket;
     if (!s)
     {
         return CUDT::APIError(MJ_NOTSUP, MN_SIDINVAL).as<int>();

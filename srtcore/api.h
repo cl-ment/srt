@@ -355,7 +355,8 @@ public:
     SRTSOCKET singleMemberConnect(CUDTGroup* g, SRT_SOCKGROUPCONFIG* target);
 #endif
     SRTSTATUS  close(const SRTSOCKET u, int reason);
-    SRTSTATUS  close(CUDTSocket* s, int reason);
+    SRTSTATUS  close(CUDTSocket* s, int reason, bool* pw_owner = NULL);
+    void waitForOtherApiCalls(CUDTSocket* s);
     void getpeername(const SRTSOCKET u, sockaddr* name, int* namelen);
     void getsockname(const SRTSOCKET u, sockaddr* name, int* namelen);
     void getsockdevname(const SRTSOCKET u, char* name, size_t* namelen);

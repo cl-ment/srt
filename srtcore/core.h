@@ -717,6 +717,7 @@ public: // internal API
     /// connection was declared broken, in which states the receiver buffer
     /// may still hold data to extract and a stream-mode reader must still
     /// be able to reach the EOF report. Replaces the former m_bConnected.
+    bool isClosingOrClosed() const { const SRTSocketState st = m_State; return st == SSS_CLOSING || st == SSS_CLOSED; }
     bool wasConnected()
     {
         return m_State == CUDT::SSS_CONNECTED
