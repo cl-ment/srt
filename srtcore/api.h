@@ -264,6 +264,7 @@ class CUDTUnited
     friend class CUDT;
     friend class CUDTGroup;
     friend class CRcvQueue;
+    friend class CMultiplexer;
     friend class CRcvBuffer;
     friend class CCryptoControl;
     friend class TestMockCUDT;
@@ -645,6 +646,11 @@ private:
 
     void checkBrokenSockets();
 
+    /// Delete a closed socket, from the receiver worker thread of its
+    /// multiplexer. Returns false if the socket can't be deleted yet
+    /// (still busy or lingering), true if it's deleted or gone.
+    bool deleteClosedSocket(SRTSOCKET u);
+
     // Attempts to remove the socket that is already closed.
     // Returns non-null multiplexer if this multiplexer was
     // holding this socket and removal has succeeded.
@@ -655,6 +661,8 @@ private:
 
     SRT_TSA_NEEDS_LOCKED(m_GlobControlLock)
     CMultiplexer* tryUnbindClosedSocket(const SRTSOCKET u);
+    void tryReleaseMuxer(int mid);
+    void removeEmptyMuxers();
 
     CEPoll m_EPoll; // handling epoll data structures and events
 

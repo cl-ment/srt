@@ -1378,6 +1378,10 @@ void CRcvQueue::worker() ATR_NOEXCEPT
 
     while (!m_bClosing)
     {
+        // Delete the sockets closed during the previous iterations. No raw
+        // pointer obtained in an iteration survives to the next one.
+        m_parent->processDeleteQueue();
+
         // NOTE: `pkt` points to a packet inside a unit that was used to read the packet.
         // It's provided (not NULL) only if it was read and it was a control packet.
         const CPacket* pkt = NULL;
@@ -2379,6 +2383,57 @@ void CMultiplexer::rollUpdateSockets(const sync::steady_clock::time_point& curti
         s->core().checkTimers();
         s->apiRelease();
     }
+}
+
+void CMultiplexer::scheduleDelete(SRTSOCKET id)
+{
+    ScopedLock lk (m_DeleteQueueLock);
+    m_DeleteQueue.push_back(id);
+    m_bDeleteQueueEmpty = false;
+    HLOGC(qmlog.Debug, log << "MUXER id=" << m_iID << ": @" << id << " scheduled for deletion");
+}
+
+void CMultiplexer::processDeleteQueue()
+{
+    if (m_bDeleteQueueEmpty)
+        return;
+
+    vector<SRTSOCKET> ids;
+    {
+        ScopedLock lk (m_DeleteQueueLock);
+        swap(ids, m_DeleteQueue);
+        m_bDeleteQueueEmpty = true;
+    }
+
+    vector<SRTSOCKET> remaining;
+    for (vector<SRTSOCKET>::iterator i = ids.begin(); i != ids.end(); ++i)
+    {
+        if (!CUDT::uglobal().deleteClosedSocket(*i))
+            remaining.push_back(*i);
+    }
+
+    if (!remaining.empty())
+    {
+        ScopedLock lk (m_DeleteQueueLock);
+        m_DeleteQueue.insert(m_DeleteQueue.end(), remaining.begin(), remaining.end());
+        m_bDeleteQueueEmpty = false;
+    }
+}
+
+bool CMultiplexer::collectIfAllClosed(vector<SRTSOCKET>& w_ids)
+{
+    ScopedLock lk (m_SocketsLock);
+    w_ids.clear();
+    for (socklist_t::iterator i = m_Sockets.begin(); i != m_Sockets.end(); ++i)
+    {
+        if (i->m_pSocket->core().m_State != CUDT::SSS_CLOSED)
+        {
+            w_ids.clear();
+            return false;
+        }
+        w_ids.push_back(i->m_pSocket->id());
+    }
+    return true;
 }
 
 bool CMultiplexer::tryCloseIfEmpty()

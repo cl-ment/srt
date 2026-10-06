@@ -938,6 +938,11 @@ private:
     // value might be useful with debugging though.
     sync::CThread::id m_ReservedDisposal;
 
+    // Closed sockets to be deleted by the receiver worker thread.
+    sync::Mutex m_DeleteQueueLock;
+    std::vector<SRTSOCKET> m_DeleteQueue;
+    sync::atomic<bool> m_bDeleteQueueEmpty;
+
 public:
 
     // CAREFUL with this function. This will close the channel
@@ -986,6 +991,21 @@ public:
 
     // For testing
     std::string testAllSocketsClear();
+
+    /// Schedule the deletion of a closed socket (SSS_CLOSED, already in
+    /// CUDTUnited::m_ClosedSockets). The deletion is done by the receiver
+    /// worker thread, between two iterations of its loop, so that no raw
+    /// pointer to the socket is still in use in this thread.
+    void scheduleDelete(SRTSOCKET id);
+
+    /// Delete the sockets scheduled by scheduleDelete(). A socket that can't
+    /// be deleted yet (busy or lingering) is kept for the next call.
+    /// Must be called from the receiver worker thread only.
+    void processDeleteQueue();
+
+    /// Collect the IDs of all sockets of this multiplexer if they are all
+    /// closed (SSS_CLOSED). Returns false (and leaves w_ids empty) if any is not.
+    bool collectIfAllClosed(std::vector<SRTSOCKET>& w_ids);
 
     bool addSocket(CUDTSocket* s);
     bool deleteSocket(SRTSOCKET id);
@@ -1043,6 +1063,7 @@ public:
         , m_RcvQueue(this)
         , m_pChannel(NULL)
         , m_ReservedDisposal()
+        , m_bDeleteQueueEmpty(true)
     {
         m_SocketMap.reserve(1024); // reserve buckets - std::unordered_map version
     }
@@ -1056,6 +1077,7 @@ public:
         , m_RcvQueue(this)
         , m_pChannel(NULL)
         , m_ReservedDisposal()
+        , m_bDeleteQueueEmpty(true)
     {
     }
 
@@ -1072,6 +1094,7 @@ public:
         , m_RcvQueue(this)
         , m_pChannel(NULL)
         , m_ReservedDisposal()
+        , m_bDeleteQueueEmpty(true)
     {
     }
 #endif

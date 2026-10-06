@@ -738,6 +738,11 @@ void CUDTUnited::swipeSocket_LOCKED(SRTSOCKET id, CUDTSocket* s, CUDTUnited::Swi
     {
         m_Sockets.erase(id);
     }
+
+    // A socket bound to a multiplexer is deleted by its receiver worker.
+    CMultiplexer* mux = map_getp(m_mMultiplexer, s->m_iMuxID);
+    if (mux)
+        mux->scheduleDelete(id);
 }
 
 // XXX NOTE: TSan reports here false positive against the call
@@ -2768,19 +2773,7 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
             if (pw_owner)
                 *pw_owner = true;
             swipeSocket_LOCKED(s->id(), s, SWIPE_NOW);
-            CMultiplexer* mux = tryUnbindClosedSocket(s->id());
-
-            // As the listener that contains no spawned-off accepted
-            // socket is being closed, it's withdrawn from the muxer.
-            // This is the only way how it can be checked that this
-            // multiplexer has lost all its sockets and therefore
-            // should be deleted.
-
-            // WARNING: checkRemoveMux is like "delete this".
-            if (mux)
-            {
-                checkRemoveMux(*mux);
-            }
+            tryReleaseMuxer(s->m_iMuxID);
         }
 
         // broadcast all "accept" waiting
@@ -2837,19 +2830,7 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
         m_EPoll.wipe_usock(s->id(), s->core().m_sPollID);
 
         swipeSocket_LOCKED(s->id(), s, SWIPE_NOW);
-
-        // Run right now the function that should attempt to delete the socket.
-        // XXX Right now it will never work because the busy lock is applied on
-        // the whole code calling this function, and with this lock, removal will
-        // never happen.
-        CMultiplexer* mux = tryUnbindClosedSocket(u);
-        if (mux && mux->tryCloseIfEmpty())
-        {
-            // NOTE: ONLY AFTER stopping the workers can the SOCKET be deleted,
-            // even after moving to closed and being unbound!
-            SRT_ASSERT(mux->empty());
-            checkRemoveMux(*mux);
-        }
+        tryReleaseMuxer(s->m_iMuxID);
 
         HLOGC(smlog.Debug, log << "@" << u << "U::close: Socket MOVED TO CLOSED for collecting later.");
 
@@ -3653,6 +3634,11 @@ void CUDTUnited::checkBrokenSockets()
         // than through the numeric ID). Therefore this way of busy acquisition
         // should be done only if at the moment of acquisition there are certainly
         // other conditions applying on the socket that prevent it from being deleted.
+        // A socket bound to a multiplexer is deleted by its receiver worker,
+        // except at the library cleanup.
+        if (!forced_closing && ps->m_iMuxID != -1)
+            continue;
+
         if (ps->isStillBusy())
         {
             // NOTE: you can't use forced_closing to prevent it because isStillBusy
@@ -3716,7 +3702,84 @@ void CUDTUnited::checkBrokenSockets()
         }
     }
 
+    removeEmptyMuxers();
+
     HLOGC(smlog.Debug, log << "checkBrokenSockets: after removal: m_ClosedSockets.size()=" << m_ClosedSockets.size());
+}
+
+// A multiplexer whose last socket was deleted by its own worker can't be
+// stopped by this worker; it's removed here.
+// [[using locked(m_GlobControlLock)]]
+void CUDTUnited::removeEmptyMuxers()
+{
+    vector<int> empty_mids;
+    for (map<int, CMultiplexer>::iterator i = m_mMultiplexer.begin(); i != m_mMultiplexer.end(); ++i)
+    {
+        if (i->second.empty())
+            empty_mids.push_back(i->first);
+    }
+
+    // checkRemoveMux() unlocks m_GlobControlLock, so find each one again.
+    for (vector<int>::iterator i = empty_mids.begin(); i != empty_mids.end(); ++i)
+    {
+        CMultiplexer* mux = map_getp(m_mMultiplexer, *i);
+        if (mux && mux->empty())
+            checkRemoveMux(*mux);
+    }
+}
+
+// If all the sockets of the multiplexer are closed, unbind them and delete
+// the multiplexer now, so that its UDP port is released immediately.
+// Otherwise the closed sockets are deleted by the multiplexer's worker.
+// [[using locked(m_GlobControlLock)]]
+void CUDTUnited::tryReleaseMuxer(int mid)
+{
+    CMultiplexer* mux = map_getp(m_mMultiplexer, mid);
+    if (!mux || mux->isSelfDestructAttempt())
+        return;
+
+    vector<SRTSOCKET> ids;
+    if (!mux->collectIfAllClosed((ids)))
+        return;
+
+    for (vector<SRTSOCKET>::iterator i = ids.begin(); i != ids.end(); ++i)
+        tryUnbindClosedSocket(*i);
+
+    // WARNING: checkRemoveMux is like "delete this".
+    if (mux->tryCloseIfEmpty())
+        checkRemoveMux(*mux);
+}
+
+bool CUDTUnited::deleteClosedSocket(SRTSOCKET u)
+{
+    ExclusiveLock cg(m_GlobControlLock);
+
+    sockets_t::iterator i = m_ClosedSockets.find(u);
+    if (i == m_ClosedSockets.end())
+        return true; // already deleted
+
+    CUDTSocket* s = i->second;
+    CUDT& c = s->core();
+
+    // Asynchronous linger: keep the socket until its sender buffer is empty
+    // or the linger time has expired.
+    if (!is_zero(c.m_tsLingerExpiration))
+    {
+        if (c.m_pSndBuffer && c.m_pSndBuffer->getCurrBufSize() > 0
+                && c.m_tsLingerExpiration > steady_clock::now())
+            return false;
+        c.m_tsLingerExpiration = steady_clock::time_point();
+    }
+
+    if (s->isStillBusy())
+        return false;
+
+    HLOGC(smlog.Debug, log << "deleteClosedSocket: @" << u << " - deleting from its multiplexer worker");
+
+    // The multiplexer (if it's empty now) can't be stopped from its own
+    // worker; it's done by removeEmptyMuxers().
+    tryRemoveClosedSocket(u);
+    return m_ClosedSockets.count(u) == 0;
 }
 
 // [[using locked(m_GlobControlLock)]]
@@ -3889,20 +3952,6 @@ CMultiplexer* CUDTUnited::tryRemoveClosedSocket(const SRTSOCKET u)
         return NULL;
     }
 
-    // Check again after reacquisition
-    if (s->isStillBusy())
-    {
-        HLOGC(smlog.Debug, log << "@" << id << " is still busy, NOT deleting");
-        return NULL;
-    }
-
-    // delete this one
-    // IMPORTANT!!! After erasing the entry in m_ClosedSockets
-    // the socket must be deleted. If deletion is by any reason not possible,
-    // the socket must stay in m_ClosedSockets so that the next GC cycle can
-    // try again.
-    m_ClosedSockets.erase(i);
-
     // IMPORTANT!!!
     //
     // The order of deletion must be: first delete socket, then multiplexer.
@@ -3926,12 +3975,29 @@ CMultiplexer* CUDTUnited::tryRemoveClosedSocket(const SRTSOCKET u)
         }
         else
         {
-            // Unpin this socket from the multiplexer.
+            // Unpin this socket from the multiplexer. From now on, no queue
+            // of the multiplexer can acquire it anymore.
             s->m_iMuxID = -1;
             mux->deleteSocket(u);
             HLOGC(smlog.Debug, log << CONID(u) << "deleted from MUXER and cleared muxer ID");
         }
     }
+
+    // Check again after reacquisition and removal from the multiplexer.
+    if (s->isStillBusy())
+    {
+        // Unbound now: it will be deleted later by the GC.
+        HLOGC(smlog.Debug, log << "@" << id << " is still busy, NOT deleting");
+        return mux;
+    }
+
+    // delete this one
+    // IMPORTANT!!! After erasing the entry in m_ClosedSockets
+    // the socket must be deleted. If deletion is by any reason not possible,
+    // the socket must stay in m_ClosedSockets so that the next GC cycle can
+    // try again.
+    m_ClosedSockets.erase(i);
+
     HLOGC(smlog.Debug, log << "GC/tryRemoveClosedSocket: DELETING SOCKET @" << u);
     delete s;
     HLOGC(smlog.Debug, log << "GC/tryRemoveClosedSocket: socket @" << u << " DELETED. Checking muxer id=" << mid);
