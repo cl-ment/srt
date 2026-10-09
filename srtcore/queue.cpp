@@ -747,16 +747,8 @@ void CSndQueue::workerSendOrder()
 
             IF_HEAVY_LOGGING(const int id = u.socketID());
 
-#ifdef TO_REMOVE
-#define UST(field) ((u.m_b##field) ? "+" : "-") << #field << " "
-            HLOGC(qslog.Debug,
-                    log << "CSndQueue: requesting packet from @" << id << " STATUS: " << UST(Listening)
-                    << UST(Connecting) << UST(Connected) << UST(Closing) << UST(Shutdown) << UST(Broken) << UST(PeerHealth)
-                    << UST(Opened));
-#undef UST
-#endif
-
-            // TO_REMOVE if (!u.m_bConnected || u.m_bBroken || u.m_bClosing)
+            HLOGC(qslog.Debug, log << "CSndQueue: requesting packet from @" << id
+                                   << " STATE: " << CUDT::stateStr(u.m_State));
             if (u.m_State != CUDT::SSS_CONNECTED)
             {
                 HLOGC(qslog.Debug, log << "Socket to be processed is already broken, not packing");
@@ -930,7 +922,7 @@ void CRcvQueue::updateConnStatus(EReadStatus rst, EConnectStatus cst, const CPac
                 uint32_t res[1] = {SRT_CLS_DEADLSN};
                 i->u->sendCtrl(UMSG_SHUTDOWN, NULL, res, sizeof res);
 
-            } 
+            }
         }
     }
 
@@ -943,13 +935,10 @@ void CRcvQueue::updateConnStatus(EReadStatus rst, EConnectStatus cst, const CPac
     for (vector<LinkStatusInfo>::iterator i = toRemove.begin(); i != toRemove.end(); ++i)
     {
         HLOGC(cnlog.Debug, log << FUNID() << ": COMPLETING dep objects update on failed @" << i->id);
-        // Setting m_bConnecting to false, and need to remove the socket from the rendezvous queue
-        // because the next CUDT::close will not remove it from the queue when m_bConnecting = false,
-        // and may crash on next pass.
+        // The socket has already been removed from the rendezvous queue
+        // by CMultiplexer::qualifyToHandleRID().
         //
         // TODO: maybe lock i->u->m_ConnectionLock?
-        // TO_REMOVE i->u->m_bConnecting = false; 
-        // TODO I do not know what would be the m_State
 
         // DO NOT close the socket here because in this case it might be
         // unable to get status from at the right moment. Also only member
@@ -1872,7 +1861,7 @@ EConnectStatus CRcvQueue::worker_HandleUnexpectedCtrl(CUDT& u, const CPacket& pa
     }
 }
 
-EConnectStatus CRcvQueue::worker_PassToListener(CUDT& u, CPacket& packet, const sockaddr_any& addr)
+EConnectStatus CRcvQueue::worker_PassToListener(CUDT& u, CPacket& packet, const sockaddr_any& addr SRT_ATR_UNUSED)
 {
     // The shared lock prevents the listener from being closed (withdrawn from
     // the default socket slot, see CUDT::notListening()) while it processes
@@ -1954,7 +1943,7 @@ void CRcvQueue::worker_PassDataToConnected(CUDT& u, RcvUnit& unit SRT_ATR_UNUSED
 // Updates a connected socket after it has processed a packet.
 void CRcvQueue::worker_PostDispatch(CUDT& u)
 {
-    if (u.m_State == CUDT::SSS_BROKEN || u.m_State == CUDT::SSS_CLOSING || u.m_State == CUDT::SSS_CLOSED)
+    if (u.isConnectionEnding())
     {
         // If these flags are set, the socket is no longer eligible for any
         // updates, and they no longer are consistent as "former" group members.
@@ -2541,7 +2530,6 @@ void CMultiplexer::rollUpdateSockets(const sync::steady_clock::time_point& curti
 
             CUDT* u = &point->m_pSocket->core();
 
-            // TO_REMOVE if (u->m_bConnected && !u->m_bBroken && !u->m_bClosing)
             if (u->m_State == CUDT::SSS_CONNECTED)
             {
                 // Lock the sockets being collected here to prevent unexpected deletion
@@ -2681,4 +2669,3 @@ string SocketHolder::StateStr(SocketHolder::State st)
 }
 
 } // end namespace
-
