@@ -195,7 +195,6 @@ void CUDTSocket::breakSocket_LOCKED(int reason)
 {
     // This function is intended to be called from GC,
     // under a lock of m_GlobControlLock.
-    // TO_REMOVE m_UDT.m_bBroken        = true;
     m_UDT.setState(CUDT::SSS_BROKEN);
     // SET THIS to true because this function is called always for a socket
     // that will never have any chance in the future to be manually closed.
@@ -231,46 +230,38 @@ bool CUDTSocket::readReady() const
 #endif
     switch (m_UDT.m_State)
     {
-        case CUDT::SSS_CONNECTED:
-            return m_UDT.isRcvBufferReady();
-        case CUDT::SSS_LISTENING:
-            return !m_QueuedSockets.empty();
-        case CUDT::SSS_BROKEN:
-            return true;
-        default: return false;
+    case CUDT::SSS_CONNECTED:
+        return m_UDT.isRcvBufferReady();
 
-
-
-    }
-#ifdef TO_REMOVE
-    if (m_UDT.m_bConnected && m_UDT.isRcvBufferReady())
-        return true;
-
-    if (m_UDT.m_bListening)
+    case CUDT::SSS_LISTENING:
         return !m_QueuedSockets.empty();
 
-    return broken();
-#endif
+    case CUDT::SSS_BROKEN:
+        return true;
+
+    default:
+        return false;
+    }
 }
 
 bool CUDTSocket::writeReady() const
 {
     switch (m_UDT.m_State)
     {
-        case CUDT::SSS_CONNECTED:
-            return (m_UDT.m_pSndBuffer->getCurrBufSize() < m_UDT.m_config.iSndBufSize);
-        case CUDT::SSS_BROKEN:
-            // TODO maybe add SSS_CLOSING and SSS_CLOSE
-            return true;
-        default:
-            return false;
+    case CUDT::SSS_CONNECTED:
+        return (m_UDT.m_pSndBuffer->getCurrBufSize() < m_UDT.m_config.iSndBufSize);
+
+    case CUDT::SSS_BROKEN:
+        // TODO maybe add SSS_CLOSING and SSS_CLOSE
+        return true;
+
+    default:
+        return false;
     }
-    // TO_REMOVE return (m_UDT.m_bConnected && (m_UDT.m_pSndBuffer->getCurrBufSize() < m_UDT.m_config.iSndBufSize)) || broken();
 }
 
 bool CUDTSocket::broken() const
 {
-    // TO_REMOVE return m_UDT.m_bBroken || !m_UDT.m_bConnected;
     return m_UDT.m_State == CUDT::SSS_BROKEN;
 }
 
@@ -697,12 +688,10 @@ void CUDTUnited::swipeSocket_LOCKED(CUDTSocket* s)
         mux->scheduleDelete(s->id());
 }
 
-// XXX NOTE: TSan reports here false positive against the call
-// to CRcvQueue::removeListener. This here will apply shared
-// lock on m_GlobControlLock in the call of locateSocket, while
-// having applied a shared lock on CRcvQueue::m_pListener in
-// CRcvQueue::worker_ProcessConnectionRequest. As this thread
-// locks both mutexes as shared, it doesn't form a deadlock.
+// NOTE: This is called by the worker thread while holding a shared lock
+// on CRcvQueue::m_pDefaultSocket (the listener). No thread may lock this
+// slot exclusively while holding m_GlobControlLock: only the owner of the
+// slot (this listener) does it, when closing, see CUDT::releaseDefaultSocket().
 int CUDTUnited::newConnection(const SRTSOCKET     listener,
                                    const sockaddr_any& peer,
                                    const CPacket&      hspkt,
@@ -731,7 +720,6 @@ int CUDTUnited::newConnection(const SRTSOCKET     listener,
     // if this connection has already been processed
     if ((ns = locatePeer(peer, w_hs.m_iID, w_hs.m_iISN)) != NULL)
     {
-        // TO_REMOVE if (ns->core().m_bBroken)
         if (ns->core().m_State == CUDT::SSS_BROKEN)
         {
             // last connection from the "peer" address has been broken;
@@ -1518,7 +1506,6 @@ SRTSOCKET CUDTUnited::accept(const SRTSOCKET listen, sockaddr* pw_addr, int* pw_
         throw CUDTException(MJ_SETUP, MN_CLOSED, 0);
     }
 
-    // TO_REMOVE SRT_ASSERT(s->core().m_bConnected);
     // The queued socket has been connected, but it may have been broken
     // since then (e.g. the peer rejected our CONCLUSION response and sent
     // UMSG_SHUTDOWN), which is reported to the application afterwards.
@@ -2663,11 +2650,6 @@ SRTSTATUS CUDTUnited::close(CUDTSocket* s, int reason, bool* pw_owner)
 
     if (s->core().m_State == CUDT::SSS_LISTENING)
     {
-#ifdef TO_REMOVE
-        if (s->core().m_bBroken)
-            return SRT_STATUS_OK;
-        s->core().m_bBroken     = true;
-#endif
         // Remove the listener from the RcvQueue IMMEDIATELY, otherwise the
         // application would be unable to bind to this port that the
         // about-to-delete listener is currently occupying.
@@ -2882,7 +2864,6 @@ void CUDTUnited::getpeername(const SRTSOCKET u, sockaddr* pw_name, int* pw_namel
     if (!s)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
 
-    // TO_REMOVE if (!s->core().m_bConnected || s->core().m_bBroken)
     if (s->core().m_State != CUDT::SSS_CONNECTED)
         throw CUDTException(MJ_CONNECTION, MN_NOCONN, 0);
 
@@ -2905,7 +2886,6 @@ void CUDTUnited::getsockname(const SRTSOCKET u, sockaddr* pw_name, int* pw_namel
     if (!s)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
 
-    // TO_REMOVE if (s->core().m_bBroken)
     if (s->core().m_State == CUDT::SSS_BROKEN)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
 
@@ -2931,7 +2911,6 @@ void CUDTUnited::getsockdevname(const SRTSOCKET u, char* pw_name, size_t* pw_nam
     if (!s)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
 
-    // TO_REMOVE if (s->core().m_bBroken)
     if (s->core().m_State == CUDT::SSS_BROKEN)
         throw CUDTException(MJ_NOTSUP, MN_SIDINVAL, 0);
 
@@ -3095,7 +3074,6 @@ int CUDTUnited::selectEx(const vector<SRTSOCKET>& fds,
             CUDTSocket* s = sk.socket;
 
             if ((!s)
-                // TO_REMOVE || s->core().m_bBroken
                 || s->core().m_State == CUDT::SSS_BROKEN
                 || (s->core().m_State == CUDT::SSS_CLOSED)
 #if SRT_ENABLE_BONDING
@@ -3111,12 +3089,10 @@ int CUDTUnited::selectEx(const vector<SRTSOCKET>& fds,
                 continue;
             }
 
+            CUDT& u = s->core();
+
             if (readfds)
             {
-#ifdef TO_REMOVE
-                if ((s->core().m_bConnected && s->core().isRcvBufferReady()) ||
-                    (s->core().m_bListening && (s->m_QueuedSockets.size() > 0)))
-#endif
                 if (s->readReady())
                 {
                     readfds->push_back(s->id());
@@ -3126,8 +3102,8 @@ int CUDTUnited::selectEx(const vector<SRTSOCKET>& fds,
 
             if (writefds)
             {
-                // TO_REMOVE if (s->core().m_bConnected && (s->core().m_pSndBuffer->getCurrBufSize() < s->core().m_config.iSndBufSize))
-                if (s->core().m_State == CUDT::SSS_CONNECTED && (s->core().m_pSndBuffer->getCurrBufSize() < s->core().m_config.iSndBufSize))
+                if (u.m_State == CUDT::SSS_CONNECTED
+                        && (u.m_pSndBuffer->getCurrBufSize() < u.m_config.iSndBufSize))
                 {
                     writefds->push_back(s->id());
                     ++count;
@@ -3379,6 +3355,26 @@ bool CUDTUnited::acquireSocket(CUDTSocket* s)
     return true;
 }
 
+// Acquires the default socket of the multiplexer (see acquireSocket), or
+// returns NULL if there is none.
+CUDTSocket* CUDTUnited::acquireDefaultSocket(CMultiplexer& mux)
+{
+    // Lock order: m_GlobControlLock, then the default socket slot. The GC
+    // releases the slot before deleting the socket, under m_GlobControlLock,
+    // so the socket can't be deleted before being acquired.
+    SharedLock cg(m_GlobControlLock);
+    CUDT* u = mux.getDefaultSocket();
+    if (!u)
+        return NULL;
+
+    CUDTSocket* s = u->m_parent;
+    if (s->core().m_State >= CUDT::SSS_CLOSED)
+        return NULL;
+
+    s->apiAcquire();
+    return s;
+}
+
 void CUDTUnited::releaseSocket(CUDTSocket* s)
 {
     SRT_ASSERT(s && s->isStillBusy() > 0);
@@ -3473,9 +3469,11 @@ void CUDTUnited::releaseMuxer_LOCKED(CMultiplexer* mux)
 // [[using locked(m_GlobControlLock)]]
 void CUDTUnited::disposeMuxer_LOCKED(CMultiplexer* mux)
 {
-    const int mid = mux->id();
+    const int mid SRT_ATR_UNUSED = mux->id();
     if (!mux->empty())
+    {
         LOGC(smlog.Error, log << "disposeMuxer: IPE: MUXER id=" << mid << " still has " << mux->nsockets() << " sockets");
+    }
 
     HLOGC(smlog.Debug, log << "disposeMuxer: deleting MUXER id=" << mid);
     m_mMultiplexer.erase(mid);
@@ -3656,6 +3654,7 @@ void CUDTUnited::unbindSocket_LOCKED(CUDTSocket* s)
         return;
     }
 
+    s->core().releaseDefaultSocket();
     mux->deleteSocket(s->id());
 
     // The socket may outlive the multiplexer, if busy: release the buffer

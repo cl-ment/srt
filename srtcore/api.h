@@ -227,7 +227,6 @@ public:
     // is no longer usable.
     void setClosing()
     {
-        // TO_REMOVE core().m_bClosing = true;
         core().setState(CUDT::SSS_CLOSING);
 
         // Wake up a thread possibly blocked in a blocking-mode srt_connect()
@@ -240,7 +239,6 @@ public:
 
     void setBreaking()
     {
-        // TO_REMOVE core().m_bBreaking = true;
         core().setState(CUDT::SSS_BREAKING);
         core().notifyBlockingConnect();
     }
@@ -567,6 +565,7 @@ public:
 
     CUDTSocket* locateAcquireSocket(SRTSOCKET u, ErrorHandling erh = ERH_RETURN);
     bool acquireSocket(CUDTSocket* s);
+    CUDTSocket* acquireDefaultSocket(CMultiplexer& mux);
     void releaseSocket(CUDTSocket* s);
 
 private:

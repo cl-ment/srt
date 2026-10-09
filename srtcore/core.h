@@ -1,11 +1,11 @@
 /*
  * SRT - Secure, Reliable, Transport
  * Copyright (c) 2018 Haivision Systems Inc.
- * 
+ *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
- * 
+ *
  */
 
 /*****************************************************************************
@@ -149,7 +149,7 @@ struct RateMeasurement
     typedef clock_type::duration clock_interval;
 
     static const int SLICE_INTERVAL_MS = 20;
-    static const size_t MIN_SLICES = 5; // min 
+    static const size_t MIN_SLICES = 5; // min
     static const size_t MAX_SLICES = 10;
 
     sync::Mutex m_lock;
@@ -634,10 +634,20 @@ public: // internal API
     // immediately to free the socket
     int notListening()
     {
-        // TO REMOVE m_bListening = false;
-        m_pMuxer->removeListener(this);
+        releaseDefaultSocket();
         return m_pMuxer->id();
     }
+
+    /// Makes this socket the default socket of its multiplexer, that is, the
+    /// one receiving the packets addressed to socket ID 0 (listener or
+    /// rendezvous socket).
+    /// @return false if another socket is already the default socket.
+    bool claimDefaultSocket();
+
+    /// Releases the default socket slot of the multiplexer, if this socket
+    /// occupies it. The slot is locked only by its owner, so this can be called
+    /// for any socket, also under m_GlobControlLock.
+    void releaseDefaultSocket();
 
     static int32_t generateISN()
     {
@@ -663,8 +673,12 @@ public: // internal API
     CSrtConfig m_config;
 
     SRTU_PROPERTY_RO(SRTSOCKET, id, m_SocketID);
-    // TO_REMOVE SRTU_PROPERTY_RO(bool, isClosing, m_bClosing);
     bool isClosing() { return m_State == SSS_CLOSING; }
+    bool isConnectionEnding() const
+    {
+        const SRTSocketState st = m_State;
+        return st == SSS_CLOSING || st == SSS_BROKEN || st == SSS_CLOSED;
+    }
     bool isConnecting() const { return isConnectingState(m_State); }
     // Not yet listening, connecting or connected: INIT (not bound) or OPENED (bound).
     bool isIdleState() const { const SRTSocketState st = m_State; return st == SSS_INIT || st == SSS_OPENED; }
@@ -700,7 +714,6 @@ public: // internal API
     /// @brief  Request a socket to be broken due to too long instability (normally by a group).
     void breakAsUnstable()
     {
-        // TO_REMOVE m_bBreakAsUnstable = true;
         setState(CUDT::SSS_BREAK_AS_UNSTABLE);
         setAgentCloseReason(SRT_CLS_UNSTABLE);
     }
@@ -728,9 +741,9 @@ public: // internal API
     bool changeState(SRTSocketState from, SRTSocketState to) { return m_State.compare_exchange(from, to); }
     bool wasConnected()
     {
-        return m_State == CUDT::SSS_CONNECTED
-            || m_State == CUDT::SSS_SHUTDOWN
-            || m_State == CUDT::SSS_BROKEN;
+        return m_State == SSS_CONNECTED
+            || m_State == SSS_SHUTDOWN
+            || m_State == SSS_BROKEN;
     }
 
     /// True if the connection was terminated by a UMSG_SHUTDOWN received from
@@ -746,16 +759,7 @@ public: // internal API
 
     bool stillConnected()
     {
-        return m_State == CUDT::SSS_CONNECTED;
-#ifdef TO_REMOVE
-        // Still connected is when:
-        // - no "broken" condition appeared (security, protocol error, response timeout)
-        return !m_bBroken
-            // - still connected (no one called srt_close())
-            && m_bConnected
-            // - isn't currently closing (srt_close() called, response timeout, shutdown)
-            && !m_bClosing;
-#endif 
+        return m_State == SSS_CONNECTED;
     }
 
 private:
@@ -774,25 +778,40 @@ private:
     int handleHandshakeConclusionListening(CPacket &packet, CHandShake &hs);
     int handleHandshakeInductionListening(CPacket &packet, CHandShake &hs);
     int handleHandshakeListening(CPacket &packet);
-    int handlePacketListening(CPacket &packet);
 
     // Caller (non-rendezvous) side of the handshake state machine.
-    // Entry point from the receiver worker for packets addressed to a
-    // PENDING caller socket. Applies m_ConnectionLock.
-    SRT_ATR_NODISCARD EConnectStatus handlePacketCaller(const CPacket& packet) ATR_NOEXCEPT;
-    EConnectStatus handleHandshakeCaller(const CPacket& packet, CUDTException* eout) ATR_NOEXCEPT;
-    EConnectStatus handleHandshakeInductionCaller(const CHandShake& hs) ATR_NOEXCEPT;
-    EConnectStatus handleHandshakeConclusionCaller(const CPacket& packet, const CHandShake& hs, CUDTException* eout) ATR_NOEXCEPT;
+    // The handle* functions are the entry points from the receiver worker, one
+    // per packet type and socket state: they apply m_ConnectionLock, check that
+    // the socket is still in the expected state, process the packet and reset
+    // the request time so that the next request is sent immediately.
+    SRT_ATR_NODISCARD EConnectStatus handleHandshakeInductionCaller(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_ATR_NODISCARD EConnectStatus handleHandshakeConclusionCaller(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_ATR_NODISCARD EConnectStatus handleShutdownCaller(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_ATR_NODISCARD EConnectStatus handleUnexpectedCaller(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
+    bool isConnectingCaller(const char* fn, const CPacket& packet) const;
+    SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
+    EConnectStatus endCallerStep(const char* fn, EConnectStatus cst);
+    SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
+    EConnectStatus processHandshakeInductionCaller(const CHandShake& hs);
+    SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
+    EConnectStatus processHandshakeConclusionCaller(const CPacket& packet, const CHandShake& hs);
     SRT_ATR_NODISCARD bool loadResponseHandshake(const CPacket& packet, CHandShake& w_hs);
 
     // Rendezvous side of the handshake state machine.
-    // Entry point from the receiver worker for packets addressed to a
-    // PENDING rendezvous socket. Applies m_ConnectionLock.
-    SRT_ATR_NODISCARD EConnectStatus handlePacketRendezvous(const CPacket& packet) ATR_NOEXCEPT;
+    // The handle* functions are the entry points from the receiver worker, one
+    // per packet type: they apply m_ConnectionLock, check that the socket is
+    // still connecting, process the packet and wake up a blocking connect when
+    // the connection is established or rejected.
+    SRT_ATR_NODISCARD EConnectStatus handleHandshakeRendezvous(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_ATR_NODISCARD EConnectStatus handlePeerConnectedRendezvous(const CPacket& packet) ATR_NOEXCEPT;
+    SRT_ATR_NODISCARD EConnectStatus handleUnexpectedRendezvous(const CPacket& packet) ATR_NOEXCEPT;
     SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
-    EConnectStatus handlePeerConnectedRendezvous(const CPacket& packet);
+    bool isConnectingRendezvous(const char* fn, const CPacket& packet) const;
     SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
-    EConnectStatus handleHandshakeRendezvous(const CPacket& packet);
+    EConnectStatus endRendezvousStep(const char* fn, EConnectStatus cst);
+    SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
+    EConnectStatus processHandshakeRendezvous(const CPacket& packet);
     SRT_TSA_NEEDS_LOCKED(m_ConnectionLock)
     EConnectStatus handleHandshakeRendezvousHSv4(const CPacket& packet);
     // Per-state HSv5 handlers: decide the response type and extension, and
@@ -1057,11 +1076,11 @@ private:
     SRT_ERRNO applyMemberConfigObject(const SRT_SocketOptionObject& opt);
 #endif
 
-    /// read the performance data with bytes counters since bstats() 
-    ///  
+    /// read the performance data with bytes counters since bstats()
+    ///
     /// @param perf [in, out] pointer to a CPerfMon structure to record the performance data.
-    /// @param clear [in] flag to decide if the local performance trace should be cleared. 
-    /// @param instantaneous [in] flag to request instantaneous data 
+    /// @param clear [in] flag to decide if the local performance trace should be cleared.
+    /// @param instantaneous [in] flag to request instantaneous data
     /// instead of moving averages.
     void bstats(CBytePerfMon* perf, bool clear = true, bool instantaneous = false);
 
@@ -1080,7 +1099,7 @@ private:
     /// and KMX message resent (when key change period passed and the packet was lost).
     SRT_TSA_NEEDS_NONLOCKED(m_ConnectionLock)
     void checkSndTimers();
-    
+
     /// @brief Check and perform KM refresh if needed.
     bool checkSndKMRefresh(int* aw_keyindex);
 
@@ -1195,20 +1214,11 @@ private:
     void EmitSignal(ETransmissionEvent tev, EventVariant var);
 
     // Internal state
-    sync::atomic<enum SRTSocketState> m_State;
-#ifdef TO_REMOVE
-    sync::atomic<bool> m_bListening;             // If the UDT entity is listening to connection
-    sync::atomic<bool> m_bConnecting;            // The short phase when connect() is called but not yet completed
-    sync::atomic<bool> m_bConnected;             // Whether the connection is on or off
-    sync::atomic<bool> m_bClosing;               // If the UDT entity is closing
-    sync::atomic<bool> m_bBreaking;              // The flag that declares interrupt of the connecting process
-    sync::atomic<bool> m_bBroken;                // If the connection has been broken
-    sync::atomic<bool> m_bShutdown;              // If the peer side has shutdown the connection
-    sync::atomic<bool> m_bBreakAsUnstable;       // A flag indicating that the socket should become broken because it has been unstable for too long.
-#endif 
+    sync::atomic<SRTSocketState> m_State;
     sync::atomic<bool> m_bPeerHealth;            // If the peer status is normal
     sync::atomic<bool> m_bManaged;               // The socket should be closed automatically if broken
     sync::atomic<bool> m_bOpened;                // If the UDT entity has been opened
+    sync::atomic<bool> m_bDefaultSocket;         // If this is the default socket of its multiplexer
     sync::atomic<int> m_RejectReason;
     // If the socket was closed by some reason locally, the reason is
     // in m_AgentCloseReason and the m_PeerCloseReason is then SRT_CLS_UNKNOWN.
@@ -1382,7 +1392,7 @@ private: // Receiving related data
     uint32_t m_uPeerSrtVersion;
     uint32_t m_uPeerSrtFlags;
 
-    bool m_bTsbPd;                               // Peer sends TimeStamp-Based Packet Delivery Packets 
+    bool m_bTsbPd;                               // Peer sends TimeStamp-Based Packet Delivery Packets
 
     // XXX This field is likely unused and deprecated. Check the common
     // receiver buffer feature if it has removed it.
@@ -1446,7 +1456,7 @@ private: // synchronization: mutexes and conditions
 
 private: // Common connection Congestion Control setup
     // This can fail only when it failed to create a congctl
-    // which only may happen when the congctl list is extended 
+    // which only may happen when the congctl list is extended
     // with user-supplied congctl modules, not a case so far.
     SRT_ATR_NODISCARD
     SRT_REJECT_REASON setupCC();
@@ -1474,7 +1484,10 @@ private: // Generation and processing of packets
     int  sendCtrlAck(CPacket& ctrlpkt, int size);
     void sendLossReport(const std::vector< std::pair<int32_t, int32_t> >& losslist);
 
-    bool processCtrl(const CPacket& ctrlpkt);
+    /// @brief Records that a control packet has been received from the peer
+    /// (resets the expiration counter).
+    /// @returns the current time
+    time_point notePeerResponse();
 
     /// @brief Process incoming control ACK packet.
     /// @param ctrlpkt incoming ACK packet
@@ -1505,6 +1518,12 @@ private: // Generation and processing of packets
     /// @brief Process incoming user defined control packet
     /// @param ctrlpkt incoming user defined packet
     bool processCtrlUserDefined(const CPacket& ctrlpkt);
+
+    /// @brief Process incoming congestion warning (delay warning) packet
+    void processCtrlCgWarning();
+
+    /// @brief Process incoming peer error packet
+    void processCtrlPeerError();
 
     /// @brief Update sender side socket data according to incoming ACK message.
     ///

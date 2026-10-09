@@ -702,7 +702,6 @@ private:
     void workerSendOrder();
     sync::CThread m_WorkerThread;
 
-private:
     CSendOrderList m_SendOrderList; // List of socket instances for data sending
     CChannel*     m_pChannel;  // The UDP channel for data sending
 
@@ -796,8 +795,28 @@ private:
     EReadStatus worker_ReadUnit(RcvUnit*& w_unit);
     EReadStatus worker_DropIncomingPacket();
     void worker_ProcessUnit(RcvUnit& unit, EConnectStatus& w_cst, const CPacket*& w_pkt, SRTSOCKET& w_id);
-    EConnectStatus worker_ProcessConnectionRequest(CPacket& packet, const sockaddr_any& sa);
-    EConnectStatus worker_RetryOrRendezvous(CUDT* u, const CPacket& packet);
+    EConnectStatus worker_HandlePacket(CUDT& u, RcvUnit& unit, const sockaddr_any& addr, const CPacket*& w_pkt);
+    // Handlers per packet type, dispatching on the target socket state
+    EConnectStatus worker_HandleData(CUDT& u, RcvUnit& unit, const CPacket*& w_pkt);
+    EConnectStatus worker_HandleHandshake(CUDT& u, CPacket& packet, const sockaddr_any& addr);
+    EConnectStatus worker_HandleKeepalive(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_HandleShutdown(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_HandleExt(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_HandleAck(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_HandleAckAck(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_HandleLossReport(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_HandleCgWarning(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_HandleDropReq(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_HandlePeerError(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_HandleUnknownCtrl(CUDT& u, const CPacket& packet);
+    EConnectStatus worker_HandleUnexpectedCtrl(CUDT& u, const CPacket& packet);
+    // Processing per socket state
+    EConnectStatus worker_PassToListener(CUDT& u, CPacket& packet, const sockaddr_any& addr);
+    EConnectStatus worker_AfterCaller(CUDT& u, const CPacket& packet, EConnectStatus cst);
+    EConnectStatus worker_AfterRendezvous(CUDT& u, EConnectStatus cst);
+    void worker_PassDataToConnected(CUDT& u, RcvUnit& unit, const CPacket*& w_pkt);
+    void worker_PostDispatch(CUDT& u);
+    EConnectStatus worker_HandleNotConnected(CUDT& u, const CPacket& packet);
     EConnectStatus worker_ProcessAddressedPacket(SRTSOCKET id, CUnit* unit, const sockaddr_any& sa);
     bool worker_TryAcceptedSocket(const CPacket& packet, const sockaddr_any& addr);
 
@@ -837,9 +856,9 @@ private:
 #endif
 
 private:
-    bool setListener(CUDT* u);
-    CUDT* getListener();
-    bool removeListener(CUDT* u);
+    bool setDefaultSocket(CUDT* u);
+    CUDT* getDefaultSocket();
+    bool removeDefaultSocket(CUDT* u);
     void storePktClone(SRTSOCKET id, const CPacket& pkt);
     void kick();
 
@@ -851,7 +870,13 @@ private:
     void updateConnStatus(EReadStatus rst, EConnectStatus cst, const CPacket* pkt);
 
 private:
-    sync::CSharedObjectPtr<CUDT> m_pListener;        // pointer to the (unique, if any) listening UDT entity
+    // The socket that receives the packets addressed to socket ID 0 on this
+    // multiplexer (listener or rendezvous socket). It is unique: several SRT
+    // sockets may share the multiplexer (SRTO_REUSEADDR), but only one of them
+    // can be the default socket. The worker keeps it shared-locked while a
+    // listener processes a packet, so it must be exclusively locked (claimed
+    // or released) only by its owner, see CUDT::releaseDefaultSocket().
+    sync::CSharedObjectPtr<CUDT> m_pDefaultSocket;
 
     void registerConnector(const SRTSOCKET&                      id,
                            CUDT*                                 u,
@@ -1047,7 +1072,6 @@ public:
     /// @param addr source address of the packet received over UDP (peer address).
     /// @param id socket ID.
     /// @return a pointer to CUDT instance retrieved, or NULL if nothing was found.
-    CUDT* retrieveRID(const sockaddr_any& addr, SRTSOCKET id) const;
 
     void resetExpiredRID(const std::vector<LinkStatusInfo>& toRemove);
     void registerCRL(const CRL& setup);
@@ -1115,9 +1139,9 @@ public:
     void stop();
     ~CMultiplexer();
 
-    bool removeListener(CUDT* u) { return m_RcvQueue.removeListener(u); }
-    int setListener(CUDT* u) { return m_RcvQueue.setListener(u); }
-    CUDT* getListener() { return m_RcvQueue.getListener(); }
+    bool setDefaultSocket(CUDT* u) { return m_RcvQueue.setDefaultSocket(u); }
+    CUDT* getDefaultSocket() { return m_RcvQueue.getDefaultSocket(); }
+    bool removeDefaultSocket(CUDT* u) { return m_RcvQueue.removeDefaultSocket(u); }
 
     void configure(int32_t id, const CSrtConfig& config, const sockaddr_any& reqaddr, const SYSSOCKET* udpsock);
 
